@@ -4,7 +4,7 @@
 //! Scope (deliberate, documented): `http://` only. The reference
 //! national intermediary speaks plain http upstream; production
 //! deployments terminate TLS at a fronting proxy (the CN-profile TLCP
-//! pattern, PLAN.md L6) — pulling a TLS stack in would violate the
+//! pattern, the UniDPP design framework L6) — pulling a TLS stack in would violate the
 //! dependency-light doctrine.
 
 use std::time::Duration;

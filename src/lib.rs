@@ -1,6 +1,6 @@
 //! UniDPP federated resolver (crate `unidpp-resolver`).
 //!
-//! Reference implementation of the PLAN.md L5 resolution layer and the
+//! Reference implementation of the the UniDPP design framework L5 resolution layer and the
 //! S2 seam (mirrors, national intermediary layers, dark identities):
 //! - carrier → identifier normalization across GS1 Digital Link
 //!   (AIs 01/10/21, check digit enforced), GB/T 33993 shapes (GDS

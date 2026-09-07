@@ -5,7 +5,7 @@
 //! revocations). The optional JSONL journal persists the record log and
 //! is replayed on start.
 //!
-//! PLAN.md invariants implemented here:
+//! the UniDPP design framework invariants implemented here:
 //! - I12 enumeration resistance: dark identifiers are
 //!   indistinguishable from unknown ones at the public surface
 //!   (see [`Lookup`]); there is no listing; the log never leaves the

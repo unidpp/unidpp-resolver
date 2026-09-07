@@ -1,6 +1,6 @@
 //! GB/T 33993-2017-style commodity QR codes (GS1-China 商品二维码 /
 //! gds.org.cn pattern): a national wrapper over GS1 syntax. Cross-carrier
-//! translation rules are registry content (PLAN.md interop lessons);
+//! translation rules are registry content (the UniDPP design framework interop lessons);
 //! this module implements the documented subset of carrier shapes
 //! (port of `@unidpp/resolver` `gbt33993.ts`):
 //!

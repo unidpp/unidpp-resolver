@@ -5,7 +5,7 @@
 //! surface: linkset registration/replacement, revocations, dark
 //! identities, the append-only record log.
 //!
-//! PLAN.md anchors: L5 resolution (linksets keyed by profile/role/
+//! the UniDPP design framework anchors: L5 resolution (linksets keyed by profile/role/
 //! language/region, default-link rule); S2 seam (mirrors, national
 //! intermediary layers, dark IDs); I12 enumeration resistance
 //! (resolution is by-identity pull, unknown and dark are byte-identical
