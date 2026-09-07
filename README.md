@@ -8,7 +8,8 @@ Reference implementation of the the UniDPP design framework **L5 resolution** la
 federated resolver serving **RFC 9264 JSON linksets** with context
 routing (profile × role × language × region), carrier→identifier
 normalization (GS1 Digital Link / GB/T 33993 / legacy EAN-13 /
-ISO/IEC 15459 URN passthrough), **dark identities** (enumeration
+ISO/IEC 15459 URN passthrough), **Accept-header content negotiation**
+(discovery protocol C4), **dark identities** (enumeration
 resistance, I12), **as-of stamped** resolution (I13), and
 **national-intermediary mode** (upstream proxy with cache + as-of
 stamping + stale-on-outage). Carrier and routing semantics mirror the
@@ -36,6 +37,7 @@ profile) at a fronting proxy, which is the the UniDPP design framework L6 patter
 | `src/gbt33993.rs` | GB/T 33993 shapes: GDS `/g/` paths, enterprise custom codes, bare legacy EAN-13 |
 | `src/carrier.rs` | unified carrier→identifier normalization (TS `carrier.ts` port) + identifier-key forms + invalid/unrecognized classification |
 | `src/context.rs` | L5 context routing: request context, specificity scoring (TS table), selection ordering |
+| `src/negotiate.rs` | Accept-header content negotiation (C4): media-type → routing-context table with RFC 9110 q-weights |
 | `src/linkset.rs` | RFC 9264 JSON linkset emit/parse and store-entry ↔ wire-link conversion |
 | `src/store.rs` | identifier-keyed linkset store, dark intervals, revocations, append-only record log + JSONL journal, proxy cache |
 | `src/discovery.rs` | `/.well-known/unidpp-resolver` discovery document |
@@ -91,6 +93,18 @@ Admin (Bearer `UNIDPP_ADMIN_TOKEN` when set; open in dev mode):
  Responses with a context return matching links best-first; without a
  context they preserve document order. The default link is announced
  via `Link: <uri>; rel="…"` and by the 303 redirect form.
+- **Accept negotiation (C4)**: a declarative media-type → routing-
+ context table (`application/untp+json` → `role=machine`,
+ `application/en18222+json` → `role=customs`, `text/html` →
+ `role=consumer`) applies **only when the request carries no explicit
+ context parameters** — explicit `profile`/`role`/`lang`/`region`
+ always outrank the header. Selection honours RFC 9110 q-weights
+ (q=0 dropped, client order breaks ties); the negotiated context
+ flows through the ordinary scoring, default-link, and 303-redirect
+ machinery (query form and path form alike) and is visible in
+ `x-unidpp-context`. The table is declared in the discovery document.
+ `curl -H 'Accept: application/en18222+json' localhost:8080/01/09506000134352`
+ routes the default link to the customs render.
 - **As-of**: every response carries `X-As-Of` (the effective instant —
  `now` unless `?asof=` was given).
 - **Dark identities (I12)**: the no-information 404
@@ -125,7 +139,7 @@ Admin (Bearer `UNIDPP_ADMIN_TOKEN` when set; open in dev mode):
 
 ```
 cargo build # zero warnings
-cargo test # 33 unit + 11 integration tests
+cargo test # 36 unit + 14 integration tests
 ```
 
 Integration tests spawn real servers on ephemeral ports and speak real
@@ -134,7 +148,9 @@ default), as-of behaviour and replacement history, dark-identity
 indistinguishability, legacy EAN/GDS/DL carrier acceptance, RFC 9264
 conformance (round trip with the `@unidpp/resolver` fixture shapes),
 intermediary cache/stale/local-precedence/dark-never-proxied, discovery,
-303 redirects, admin auth, and the append-only log.
+303 redirects, admin auth, the append-only log, and Accept negotiation
+(three headers → three render destinations, explicit params outranking
+the header, the redirect form).
 
 ## Deviations from the TS (documented)
 
