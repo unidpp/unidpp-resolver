@@ -11,9 +11,7 @@
 //! passthrough). The store key is `scheme:value`.
 
 use crate::gbt33993::{parse_gbt33993, parse_gds_path};
-use crate::gs1dl::{
-    parse_gs1_digital_link, parse_key_path, split_url, to_identifier, valid_gtin,
-};
+use crate::gs1dl::{parse_gs1_digital_link, parse_key_path, split_url, to_identifier, valid_gtin};
 
 /// Carrier kinds recognized by the resolver (TS `CarrierKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,8 +147,8 @@ pub fn classify_carrier(scanned: &str) -> CarrierLookup {
         }
         return CarrierLookup::Unrecognized;
     }
-    let gtin_shaped = (trimmed.len() == 13 || trimmed.len() == 14)
-        && trimmed.bytes().all(|b| b.is_ascii_digit());
+    let gtin_shaped =
+        (trimmed.len() == 13 || trimmed.len() == 14) && trimmed.bytes().all(|b| b.is_ascii_digit());
     if gtin_shaped {
         return CarrierLookup::Invalid; // GTIN shape, bad check digit
     }
@@ -308,7 +306,10 @@ mod tests {
     fn routes_gs1_and_gbt_carriers_to_normalized_identifiers() {
         let dl = parse_carrier("https://id.example.com/01/09506000134352/21/8765").unwrap();
         assert_eq!(dl.kind, CarrierKind::Gs1DigitalLink);
-        assert_eq!(dl.resolver_base_url.as_deref(), Some("https://id.example.com"));
+        assert_eq!(
+            dl.resolver_base_url.as_deref(),
+            Some("https://id.example.com")
+        );
         assert_eq!(dl.identifier.key(), "gs1:(01)09506000134352(21)8765");
 
         let gbt = parse_carrier("https://gds.example.cn/g/6901234567892").unwrap();
@@ -321,7 +322,10 @@ mod tests {
     fn passes_through_15459_urns() {
         let iso = parse_carrier("urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345").unwrap();
         assert_eq!(iso.identifier.scheme, "iso-15459");
-        assert_eq!(iso.identifier.key(), "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345");
+        assert_eq!(
+            iso.identifier.key(),
+            "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345"
+        );
         assert!(parse_carrier("garbage").is_none());
         assert!(parse_carrier("urn:iso:std:iso-iec:15459").is_none());
     }
@@ -334,7 +338,10 @@ mod tests {
             CarrierLookup::Invalid
         ));
         // Bad check digit in a bare EAN-13 is a syntax error.
-        assert!(matches!(classify_carrier("6901234567893"), CarrierLookup::Invalid));
+        assert!(matches!(
+            classify_carrier("6901234567893"),
+            CarrierLookup::Invalid
+        ));
         // A GS1-DL-shaped URL with a bad check digit demotes to a GB/T
         // custom code (TS parity), i.e. parses fine and resolves as
         // unknown.
@@ -346,7 +353,10 @@ mod tests {
             classify_carrier("https://example.org/wiki/Page"),
             CarrierLookup::Ok(_)
         ));
-        assert!(matches!(classify_carrier("hello world"), CarrierLookup::Unrecognized));
+        assert!(matches!(
+            classify_carrier("hello world"),
+            CarrierLookup::Unrecognized
+        ));
     }
 
     #[test]

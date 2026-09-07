@@ -35,14 +35,16 @@ pub mod gbt33993;
 pub mod gs1dl;
 pub mod httpc;
 pub mod linkset;
+pub mod negotiate;
 pub mod proxy;
 pub mod store;
 pub mod time;
 
 pub use api::{run, Config, TestServer};
 pub use carrier::{parse_carrier, CarrierKind, CarrierLookup, CarrierParse, ResolvedIdentifier};
-pub use context::{RequestContext, EntryRouting};
+pub use context::{EntryRouting, RequestContext};
 pub use gs1dl::{gs1_check_digit, parse_gs1_digital_link, valid_gtin};
 pub use linkset::{emit_document, parse_document};
+pub use negotiate::{context_for_accept, ACCEPT_CONTEXTS};
 pub use store::{LinkEntry, Lookup, Op, Store};
 pub use time::Timestamp;

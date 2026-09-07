@@ -189,8 +189,11 @@ fn assemble(
     path: &[(&str, &str)],
     query: &[(String, String)],
 ) -> Option<Gs1ElementString> {
-    let find_path =
-        |ai: &str| path.iter().find(|(k, _)| *k == ai).map(|(_, v)| v.to_string());
+    let find_path = |ai: &str| {
+        path.iter()
+            .find(|(k, _)| *k == ai)
+            .map(|(_, v)| v.to_string())
+    };
     let find_query = |ai: &str| query.iter().find(|(k, _)| k == ai).map(|(_, v)| v.clone());
     let check = |v: Option<String>| match v {
         None => None,
@@ -280,9 +283,8 @@ mod tests {
 
     #[test]
     fn path_position_ais() {
-        let el =
-            parse_gs1_digital_link("https://id.example.com/01/09506000134352/21/BP52-000841")
-                .unwrap();
+        let el = parse_gs1_digital_link("https://id.example.com/01/09506000134352/21/BP52-000841")
+            .unwrap();
         assert_eq!(el.gtin, "09506000134352");
         assert_eq!(el.serial.as_deref(), Some("BP52-000841"));
         let id = to_identifier(&el);
@@ -292,18 +294,16 @@ mod tests {
 
     #[test]
     fn query_position_ai_10() {
-        let el =
-            parse_gs1_digital_link("https://id.example.com/01/09506000134352?10=LOT2026Q3")
-                .unwrap();
+        let el = parse_gs1_digital_link("https://id.example.com/01/09506000134352?10=LOT2026Q3")
+            .unwrap();
         assert_eq!(el.lot.as_deref(), Some("LOT2026Q3"));
         assert_eq!(to_identifier(&el).granularity, "batch");
     }
 
     #[test]
     fn path_and_query_combined() {
-        let el =
-            parse_gs1_digital_link("https://id.example.com/01/09506000134352/21/8765?10=ABC")
-                .unwrap();
+        let el = parse_gs1_digital_link("https://id.example.com/01/09506000134352/21/8765?10=ABC")
+            .unwrap();
         assert_eq!(el.serial.as_deref(), Some("8765"));
         assert_eq!(el.lot.as_deref(), Some("ABC"));
         assert_eq!(
@@ -319,8 +319,10 @@ mod tests {
         assert!(parse_gs1_digital_link("not-a-uri").is_none());
         // An over-long serial is dropped-and-invalidated like the TS
         // (`check` returns undefined), leaving a model-granularity GTIN.
-        let long = parse_gs1_digital_link("https://id.example.com/01/09506000134352/21/ABCDEFGHIJKLMNOPQRSTUV")
-            .unwrap();
+        let long = parse_gs1_digital_link(
+            "https://id.example.com/01/09506000134352/21/ABCDEFGHIJKLMNOPQRSTUV",
+        )
+        .unwrap();
         assert_eq!(long.serial, None);
         assert_eq!(to_identifier(&long).granularity, "model");
     }

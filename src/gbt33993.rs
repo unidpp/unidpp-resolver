@@ -95,7 +95,8 @@ pub fn parse_gds_path(segments: &[String]) -> Option<GbtParseResult> {
 
 /// GDS qualifier charset (TS: `/^[\w.-]{1,20}$/`).
 fn gbt_qualifier_charset(q: &str) -> bool {
-    q.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
+    q.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
 }
 
 /// Parse a GB/T 33993 carrier: full URL (GDS path or custom code) or a

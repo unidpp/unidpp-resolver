@@ -44,6 +44,21 @@ async fn get(url: &str) -> HttpResponse {
     request("GET", url, None, None).await
 }
 
+/// GET carrying an explicit Accept header (discovery-protocol
+/// negotiation).
+async fn get_with_accept(url: &str, accept: &str) -> HttpResponse {
+    let url = Url::parse(url).expect("test URL");
+    httpc::request(
+        "GET",
+        &url,
+        &[("accept".into(), accept.to_string())],
+        None,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("http request")
+}
+
 fn enc(s: &str) -> String {
     Url::encode_query_component(s)
 }
@@ -59,7 +74,13 @@ fn links_of(resp: &HttpResponse) -> Vec<Value> {
 /// Register links through the admin API.
 async fn register(server: &TestServer, identifier: &str, links: Value) -> HttpResponse {
     let body = json!({"identifier": identifier, "links": links}).to_string();
-    request("POST", &format!("{}/admin/linksets", server.base_url), Some(&body), None).await
+    request(
+        "POST",
+        &format!("{}/admin/linksets", server.base_url),
+        Some(&body),
+        None,
+    )
+    .await
 }
 
 fn four_links() -> Value {
@@ -77,8 +98,30 @@ fn four_links() -> Value {
     ])
 }
 
+/// The discovery-protocol render bindings (the edge seed's demo
+/// contexts): one destination per negotiated representation, keyed by
+/// the routing roles the Accept table maps onto.
+fn render_links() -> Value {
+    json!([
+        {"linkType": "dpp", "href": "https://dpp.unidpp.org/eu/1",
+         "title": "EU authority view — EN 18222 render", "type": "application/en18222+json",
+         "profile": EU_PROFILE, "role": "customs", "region": "EU",
+         "language": ["en"], "asOf": AS_OF},
+        {"linkType": "dpp", "href": "https://dpp-jp.meti.example.go.jp/passport/1",
+         "title": "JP consumer view — GB/T 33993 render", "type": "text/html",
+         "profile": JP_PROFILE, "role": "consumer", "region": "JP",
+         "language": ["ja"], "asOf": AS_OF},
+        {"linkType": "dpp", "href": "https://dpp.unidpp.org/untp/1",
+         "title": "Machine view — UNTP render", "type": "application/untp+json",
+         "role": "machine", "asOf": AS_OF},
+        {"linkType": "dpp", "href": "https://dpp.unidpp.org/generic/1", "asOf": AS_OF}
+    ])
+}
+
 async fn spawn() -> TestServer {
-    TestServer::spawn(Config::default()).await.expect("spawn server")
+    TestServer::spawn(Config::default())
+        .await
+        .expect("spawn server")
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +145,10 @@ async fn routing_specificity_exact_over_fallback_over_default() {
     assert_eq!(resp.status, 200);
     let links = links_of(&resp);
     assert_eq!(links[0]["uri"], "https://dpp.unidpp.org/eu/1");
-    assert!(links.len() >= 2, "multi-link response keeps wildcard alternates");
+    assert!(
+        links.len() >= 2,
+        "multi-link response keeps wildcard alternates"
+    );
     assert_eq!(
         resp.header("link").unwrap(),
         "<https://dpp.unidpp.org/eu/1>; rel=\"dpp\""
@@ -120,7 +166,10 @@ async fn routing_specificity_exact_over_fallback_over_default() {
     ))
     .await;
     let links = links_of(&resp);
-    assert_eq!(links[0]["uri"], "https://dpp-jp.meti.example.go.jp/passport/1");
+    assert_eq!(
+        links[0]["uri"],
+        "https://dpp-jp.meti.example.go.jp/passport/1"
+    );
 
     // Language mismatch: an English speaker in the JP profile context
     // falls back to the wildcard default (the ja link is rejected).
@@ -134,7 +183,11 @@ async fn routing_specificity_exact_over_fallback_over_default() {
     assert_eq!(links[0]["uri"], "https://dpp.unidpp.org/generic/1");
 
     // Role routing with no profile preference.
-    let resp = get(&format!("{base}/resolve?identifier={}&role=recycler", enc(ISO_ID))).await;
+    let resp = get(&format!(
+        "{base}/resolve?identifier={}&role=recycler",
+        enc(ISO_ID)
+    ))
+    .await;
     let links = links_of(&resp);
     assert_eq!(links[0]["uri"], "https://dpp.unidpp.org/recycler/1");
 
@@ -144,10 +197,7 @@ async fn routing_specificity_exact_over_fallback_over_default() {
     let resp = get(&format!("{base}/resolve?identifier={}", enc(ISO_ID))).await;
     let links = links_of(&resp);
     assert_eq!(links.len(), 4);
-    let uris: Vec<&str> = links
-        .iter()
-        .map(|l| l["uri"].as_str().unwrap())
-        .collect();
+    let uris: Vec<&str> = links.iter().map(|l| l["uri"].as_str().unwrap()).collect();
     assert_eq!(
         uris,
         vec![
@@ -176,6 +226,149 @@ async fn routing_specificity_exact_over_fallback_over_default() {
 }
 
 // ---------------------------------------------------------------------------
+// Accept-header content negotiation (discovery protocol C4)
+// ---------------------------------------------------------------------------
+
+/// Three Accept headers, three destinations: the UNTP verifiable
+/// credential render, the EN 18222 API render, the human consumer
+/// view — every response stamped with x-as-of.
+#[tokio::test]
+async fn accept_header_routes_three_destinations() {
+    let server = spawn().await;
+    assert_eq!(register(&server, ISO_ID, render_links()).await.status, 201);
+    let base = &server.base_url;
+
+    for (accept, role, destination) in [
+        (
+            "application/untp+json",
+            "machine",
+            "https://dpp.unidpp.org/untp/1",
+        ),
+        (
+            "application/en18222+json",
+            "customs",
+            "https://dpp.unidpp.org/eu/1",
+        ),
+        (
+            "text/html",
+            "consumer",
+            "https://dpp-jp.meti.example.go.jp/passport/1",
+        ),
+    ] {
+        let resp = get_with_accept(
+            &format!("{base}/resolve?identifier={}", enc(ISO_ID)),
+            accept,
+        )
+        .await;
+        assert_eq!(resp.status, 200, "Accept {accept}");
+        assert_eq!(
+            resp.header("content-type").unwrap(),
+            "application/linkset+json"
+        );
+        let links = links_of(&resp);
+        assert_eq!(links[0]["uri"], destination, "Accept {accept}");
+        assert_eq!(
+            links[0]["type"], accept,
+            "the negotiated destination renders in the accepted media type"
+        );
+        assert_eq!(
+            resp.header("link").unwrap(),
+            format!("<{destination}>; rel=\"dpp\""),
+            "Accept {accept}"
+        );
+        assert_eq!(
+            resp.header("x-unidpp-context").unwrap(),
+            format!("profile=*;role={role};lang=*;region=*"),
+            "Accept {accept}"
+        );
+        let as_of = resp.header("x-as-of").unwrap();
+        assert!(
+            Timestamp::parse(as_of).is_ok(),
+            "x-as-of present and RFC 3339"
+        );
+    }
+
+    server.stop().await;
+}
+
+/// Explicit context parameters outrank the Accept header: any explicit
+/// dimension disables negotiation for the request.
+#[tokio::test]
+async fn explicit_context_overrides_accept_negotiation() {
+    let server = spawn().await;
+    assert_eq!(register(&server, ISO_ID, render_links()).await.status, 201);
+    let base = &server.base_url;
+
+    // An explicit role beats the Accept-negotiated one.
+    let resp = get_with_accept(
+        &format!("{base}/resolve?identifier={}&role=consumer", enc(ISO_ID)),
+        "application/untp+json",
+    )
+    .await;
+    assert_eq!(
+        links_of(&resp)[0]["uri"],
+        "https://dpp-jp.meti.example.go.jp/passport/1"
+    );
+    assert_eq!(
+        resp.header("x-unidpp-context").unwrap(),
+        "profile=*;role=consumer;lang=*;region=*"
+    );
+
+    // An explicit language alone also disables negotiation: an
+    // English speaker gets the en destination, not the Accept's.
+    let resp = get_with_accept(
+        &format!("{base}/resolve?identifier={}&lang=en", enc(ISO_ID)),
+        "text/html",
+    )
+    .await;
+    assert_eq!(links_of(&resp)[0]["uri"], "https://dpp.unidpp.org/eu/1");
+
+    // No table match: plain no-context resolution (document order,
+    // default-link rule — unchanged behaviour).
+    let resp = get_with_accept(
+        &format!("{base}/resolve?identifier={}", enc(ISO_ID)),
+        "application/xml",
+    )
+    .await;
+    assert!(resp.header("x-unidpp-context").is_none());
+    assert_eq!(links_of(&resp).len(), 4);
+
+    server.stop().await;
+}
+
+/// The path-form redirect negotiates too: a browser-style Accept gets
+/// the consumer destination, an API client its render — each 303
+/// stamped with x-as-of.
+#[tokio::test]
+async fn path_form_redirect_negotiates_by_accept() {
+    let server = spawn().await;
+    assert_eq!(register(&server, EAN_ID, render_links()).await.status, 201);
+    let base = &server.base_url;
+
+    let resp = get_with_accept(&format!("{base}/01/06901234567892"), "text/html").await;
+    assert_eq!(resp.status, 303);
+    assert_eq!(
+        resp.header("location").unwrap(),
+        "https://dpp-jp.meti.example.go.jp/passport/1"
+    );
+    assert!(resp.header("x-as-of").is_some());
+
+    let resp = get_with_accept(
+        &format!("{base}/01/06901234567892"),
+        "application/untp+json",
+    )
+    .await;
+    assert_eq!(resp.status, 303);
+    assert_eq!(
+        resp.header("location").unwrap(),
+        "https://dpp.unidpp.org/untp/1"
+    );
+    assert!(resp.header("x-as-of").is_some());
+
+    server.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // As-of behaviour
 // ---------------------------------------------------------------------------
 
@@ -198,7 +391,11 @@ async fn as_of_reconstruction_and_replacement_history() {
     .await;
 
     let at = |when: &str| {
-        format!("{base}/resolve?identifier={}&asof={}", enc(EAN_ID), enc(when))
+        format!(
+            "{base}/resolve?identifier={}&asof={}",
+            enc(EAN_ID),
+            enc(when)
+        )
     };
     let resp = get(&at("2026-03-01T00:00:00Z")).await;
     assert_eq!(resp.status, 200);
@@ -219,8 +416,7 @@ async fn as_of_reconstruction_and_replacement_history() {
         "links": [{"linkType": "dpp", "href": "https://dpp.example.org/v3"}]
     })
     .to_string();
-    let resp =
-        request("PUT", &format!("{base}/admin/linksets"), Some(&body), None).await;
+    let resp = request("PUT", &format!("{base}/admin/linksets"), Some(&body), None).await;
     assert_eq!(resp.status, 200);
     let replaced = json_of(&resp);
     assert_eq!(replaced["revoked"].as_array().unwrap().len(), 1);
@@ -299,7 +495,11 @@ async fn dark_identity_indistinguishable_from_unknown() {
     assert!(dark_get.header("link").is_none());
 
     // As-of queries (even before the darkening instant) are denied too.
-    let historical = get(&format!("{base}/resolve?identifier={}&asof=2020-01-01T00:00:00Z", enc(DARK))).await;
+    let historical = get(&format!(
+        "{base}/resolve?identifier={}&asof=2020-01-01T00:00:00Z",
+        enc(DARK)
+    ))
+    .await;
     assert_eq!(historical.status, 404);
     assert_eq!(historical.body_string(), unknown_get.body_string());
 
@@ -314,7 +514,10 @@ async fn dark_identity_indistinguishable_from_unknown() {
     assert_eq!(resp.status, 200);
     let restored = get(&format!("{base}/resolve?identifier={}", enc(DARK))).await;
     assert_eq!(restored.status, 200);
-    assert_eq!(links_of(&restored)[0]["uri"], "https://secret.example.org/x");
+    assert_eq!(
+        links_of(&restored)[0]["uri"],
+        "https://secret.example.org/x"
+    );
 
     server.stop().await;
 }
@@ -378,9 +581,16 @@ async fn legacy_ean_and_carrier_forms() {
         json!([{"linkType": "dpp", "href": "https://dpp.unidpp.org/eu/1", "asOf": AS_OF}]),
     )
     .await;
-    let resp = get(&format!("{base}/resolve?carrier={}", enc("urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345"))).await;
+    let resp = get(&format!(
+        "{base}/resolve?carrier={}",
+        enc("urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345")
+    ))
+    .await;
     assert_eq!(resp.status, 200);
-    assert_eq!(links_of(&resp)[0]["anchor"], "urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345");
+    assert_eq!(
+        links_of(&resp)[0]["anchor"],
+        "urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345"
+    );
 
     // Normalize endpoint mirrors the TS parseCarrier result.
     let resp = request(
@@ -451,7 +661,10 @@ async fn linkset_format_conformance_with_ts_fixture_shapes() {
     // Fetch back and compare against the fixture fields.
     let resp = get(&format!("{base}/resolve?identifier={}", enc(ISO_ID))).await;
     assert_eq!(resp.status, 200);
-    assert_eq!(resp.header("content-type").unwrap(), "application/linkset+json");
+    assert_eq!(
+        resp.header("content-type").unwrap(),
+        "application/linkset+json"
+    );
     let out = links_of(&resp);
     assert_eq!(out.len(), 4);
     for (fixture, wire) in fixture_links.iter().zip(out.iter()) {
@@ -484,7 +697,10 @@ async fn linkset_format_conformance_with_ts_fixture_shapes() {
         enc(EU_PROFILE)
     ))
     .await;
-    assert_eq!(links_of(&resp)[0]["uri"], "https://dpp.unidpp.org/eu/84120099012345");
+    assert_eq!(
+        links_of(&resp)[0]["uri"],
+        "https://dpp.unidpp.org/eu/84120099012345"
+    );
 
     server.stop().await;
 }
@@ -529,8 +745,15 @@ async fn national_intermediary_caches_stamps_and_serves_stale() {
     assert_eq!(resp.header("x-as-of").unwrap(), as_of);
 
     // Context routing works against the cached view.
-    let resp = get(&format!("{base}/resolve?identifier={}&role=recycler", enc(EAN_ID))).await;
-    assert_eq!(links_of(&resp)[0]["uri"], "https://dpp.example.org/recycler/9");
+    let resp = get(&format!(
+        "{base}/resolve?identifier={}&role=recycler",
+        enc(EAN_ID)
+    ))
+    .await;
+    assert_eq!(
+        links_of(&resp)[0]["uri"],
+        "https://dpp.example.org/recycler/9"
+    );
 
     // Stale serving: TTL expires, the upstream goes away, the cached
     // snapshot keeps serving with an explicit stale marker (I13).
@@ -577,8 +800,14 @@ async fn intermediary_dark_and_local_precedence() {
     .await;
     let resp = get(&format!("{base}/resolve?identifier={}", enc(EAN_ID))).await;
     assert_eq!(resp.status, 200);
-    assert_eq!(links_of(&resp)[0]["uri"], "https://dpp.example.org/local-ean");
-    assert!(resp.header("x-cache").is_none(), "local answers are not cache-stamped");
+    assert_eq!(
+        links_of(&resp)[0]["uri"],
+        "https://dpp.example.org/local-ean"
+    );
+    assert!(
+        resp.header("x-cache").is_none(),
+        "local answers are not cache-stamped"
+    );
 
     // A locally-dark identifier is never proxied (national-only
     // serving): the upstream has it, the intermediary denies it.
@@ -587,7 +816,11 @@ async fn intermediary_dark_and_local_precedence() {
     assert_eq!(resp.status, 200);
     let dark_resp = get(&format!("{base}/resolve?identifier={}", enc(ISO_ID))).await;
     assert_eq!(dark_resp.status, 404);
-    let unknown = get(&format!("{base}/resolve?identifier={}", enc("gs1:(01)04006381333931"))).await;
+    let unknown = get(&format!(
+        "{base}/resolve?identifier={}",
+        enc("gs1:(01)04006381333931")
+    ))
+    .await;
     assert_eq!(dark_resp.body_string(), unknown.body_string());
 
     node.stop().await;
@@ -605,8 +838,17 @@ async fn discovery_document_declares_keys_and_contexts() {
         let resp = get(&format!("{}{}", server.base_url, path)).await;
         assert_eq!(resp.status, 200);
         let doc = json_of(&resp);
-        assert_eq!(doc["identifierKeys"]["gs1ApplicationIdentifiers"], json!(["01", "10", "21"]));
-        assert_eq!(doc["identifierKeys"]["carrierSyntaxes"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            doc["identifierKeys"]["gs1ApplicationIdentifiers"],
+            json!(["01", "10", "21"])
+        );
+        assert_eq!(
+            doc["identifierKeys"]["carrierSyntaxes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
         assert_eq!(
             doc["contextRouting"]["dimensions"],
             json!(["profile", "role", "language", "region"])
@@ -640,13 +882,19 @@ async fn bare_path_redirects_to_the_default_link() {
     // registered among the 8-point ties).
     let resp = get(&format!("{base}/01/06901234567892")).await;
     assert_eq!(resp.status, 303);
-    assert_eq!(resp.header("location").unwrap(), "https://dpp.unidpp.org/eu/1");
+    assert_eq!(
+        resp.header("location").unwrap(),
+        "https://dpp.unidpp.org/eu/1"
+    );
     assert!(resp.header("x-as-of").is_some());
 
     // Context applies to the redirect too.
     let resp = get(&format!("{base}/g/6901234567892?role=recycler")).await;
     assert_eq!(resp.status, 303);
-    assert_eq!(resp.header("location").unwrap(), "https://dpp.unidpp.org/recycler/1");
+    assert_eq!(
+        resp.header("location").unwrap(),
+        "https://dpp.unidpp.org/recycler/1"
+    );
 
     // Unknown identifier: no-information 404, never a redirect.
     let resp = get(&format!("{base}/01/4006381333931")).await;
@@ -672,9 +920,21 @@ async fn admin_requires_the_bearer_token_when_configured() {
 
     let resp = request("POST", &format!("{base}/admin/linksets"), Some(&body), None).await;
     assert_eq!(resp.status, 401);
-    let resp = request("POST", &format!("{base}/admin/linksets"), Some(&body), Some("wrong")).await;
+    let resp = request(
+        "POST",
+        &format!("{base}/admin/linksets"),
+        Some(&body),
+        Some("wrong"),
+    )
+    .await;
     assert_eq!(resp.status, 401);
-    let resp = request("POST", &format!("{base}/admin/linksets"), Some(&body), Some("s3cret")).await;
+    let resp = request(
+        "POST",
+        &format!("{base}/admin/linksets"),
+        Some(&body),
+        Some("s3cret"),
+    )
+    .await;
     assert_eq!(resp.status, 201);
 
     // Public resolution is unauthenticated.
@@ -693,11 +953,18 @@ async fn healthz_and_bad_requests() {
     // Missing carrier/identifier, bad asof, both given.
     assert_eq!(get(&format!("{base}/resolve")).await.status, 400);
     assert_eq!(
-        get(&format!("{base}/resolve?identifier={}&asof=Yesterday", enc(EAN_ID))).await.status,
+        get(&format!(
+            "{base}/resolve?identifier={}&asof=Yesterday",
+            enc(EAN_ID)
+        ))
+        .await
+        .status,
         400
     );
     assert_eq!(
-        get(&format!("{base}/resolve?carrier=1&identifier=2")).await.status,
+        get(&format!("{base}/resolve?carrier=1&identifier=2"))
+            .await
+            .status,
         400
     );
     // Malformed admin body.

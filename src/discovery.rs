@@ -65,6 +65,16 @@ pub fn discovery_json(config: &Config) -> Value {
             "allKeyword": "all",
             "queryParameter": "linkType"
         },
+        "contentNegotiation": {
+            "header": "Accept",
+            "rule": "the most preferred offered media type routes the default link when the request carries no explicit context parameters",
+            "mediaTypes": crate::negotiate::ACCEPT_CONTEXTS
+                .iter()
+                .map(|(media_type, role)| {
+                    json!({"mediaType": media_type, "context": format!("role={role}")})
+                })
+                .collect::<Vec<_>>()
+        },
         "entryPoints": {
             "queryForm": "/resolve?carrier=<carrier>|identifier=<normalized>",
             "pathForm": "/<carrier-key>/linkset (linkset document)",

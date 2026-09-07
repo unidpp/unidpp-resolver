@@ -35,9 +35,18 @@ pub fn link_object(anchor: &str, e: &LinkEntry) -> Value {
     if let Some(t) = &e.media_type {
         m.insert("type".into(), json!(t));
     }
-    m.insert("unidpp:profile".into(), json!(e.profile.as_deref().unwrap_or("*")));
-    m.insert("unidpp:role".into(), json!(e.role.as_deref().unwrap_or("*")));
-    m.insert("unidpp:region".into(), json!(e.region.as_deref().unwrap_or("*")));
+    m.insert(
+        "unidpp:profile".into(),
+        json!(e.profile.as_deref().unwrap_or("*")),
+    );
+    m.insert(
+        "unidpp:role".into(),
+        json!(e.role.as_deref().unwrap_or("*")),
+    );
+    m.insert(
+        "unidpp:region".into(),
+        json!(e.region.as_deref().unwrap_or("*")),
+    );
     m.insert("unidpp:as-of".into(), json!(e.as_of.to_string()));
     if let Some(x) = e.expiry {
         m.insert("unidpp:expiry".into(), json!(x.to_string()));
@@ -57,8 +66,8 @@ pub fn emit_document(anchor: &str, entries: &[&LinkEntry]) -> String {
 /// single link object. Returns the link objects; each must carry
 /// string `anchor`, `uri` and `rel`.
 pub fn parse_document(document: &str) -> Result<Vec<Value>, String> {
-    let parsed: Value = serde_json::from_str(document)
-        .map_err(|e| format!("invalid linkset JSON: {e}"))?;
+    let parsed: Value =
+        serde_json::from_str(document).map_err(|e| format!("invalid linkset JSON: {e}"))?;
     let links = match parsed {
         Value::Array(a) => a,
         Value::Object(ref o) if o.contains_key("linkset") => match &o["linkset"] {
@@ -155,7 +164,10 @@ pub fn entry_from_link_object(link: &Value, default_as_of: Timestamp) -> Result<
 }
 
 /// Parse a whole upstream document into store entries.
-pub fn entries_from_document(document: &str, default_as_of: Timestamp) -> Result<Vec<LinkEntry>, String> {
+pub fn entries_from_document(
+    document: &str,
+    default_as_of: Timestamp,
+) -> Result<Vec<LinkEntry>, String> {
     parse_document(document)?
         .iter()
         .map(|l| entry_from_link_object(l, default_as_of))
@@ -210,7 +222,9 @@ mod tests {
   ]
 }"#;
 
-    const T0: Timestamp = Timestamp { secs: 1_800_000_000 };
+    const T0: Timestamp = Timestamp {
+        secs: 1_800_000_000,
+    };
 
     #[test]
     fn fixture_parses_and_round_trips() {
@@ -223,11 +237,22 @@ mod tests {
             .collect();
         // Round trip: entry -> wire preserves the fixture shapes.
         let refs: Vec<&LinkEntry> = entries.iter().collect();
-        let doc = emit_document("urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345", &refs);
+        let doc = emit_document(
+            "urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345",
+            &refs,
+        );
         let round = parse_document(&doc).unwrap();
         assert_eq!(round.len(), 4);
         for (orig, rt) in links.iter().zip(round.iter()) {
-            for k in ["anchor", "uri", "rel", "hreflang", "unidpp:profile", "unidpp:role", "unidpp:region"] {
+            for k in [
+                "anchor",
+                "uri",
+                "rel",
+                "hreflang",
+                "unidpp:profile",
+                "unidpp:role",
+                "unidpp:region",
+            ] {
                 assert_eq!(orig.get(k), rt.get(k), "field {k}");
             }
             assert!(rt.get("unidpp:as-of").unwrap().is_string());

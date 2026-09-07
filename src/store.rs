@@ -101,13 +101,13 @@ impl LinkEntry {
         };
         let link_type = get_str("linkType")?
             .ok_or_else(|| "`linkType` is required (non-empty, not \"*\")".to_string())?;
-        let href = get_str("href")?
-            .ok_or_else(|| "`href` is required".to_string())?;
-        let valid_href = href.starts_with("http://")
-            || href.starts_with("https://")
-            || href.starts_with("urn:");
+        let href = get_str("href")?.ok_or_else(|| "`href` is required".to_string())?;
+        let valid_href =
+            href.starts_with("http://") || href.starts_with("https://") || href.starts_with("urn:");
         if !valid_href || href.contains(char::is_whitespace) {
-            return Err(format!("`href` must be an absolute http(s)/urn URI: `{href}`"));
+            return Err(format!(
+                "`href` must be an absolute http(s)/urn URI: `{href}`"
+            ));
         }
         let languages = match obj.get("language") {
             None | Some(Value::Null) => Vec::new(),
@@ -166,10 +166,24 @@ impl LinkEntry {
 /// An append-only resolver operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
-    RegisterEntry { identifier: String, entry: LinkEntry },
-    RevokeEntry { identifier: String, entry_id: u64, effective_at: Timestamp, reason: String },
-    SetDark { identifier: String, effective_at: Timestamp },
-    ClearDark { identifier: String, effective_at: Timestamp },
+    RegisterEntry {
+        identifier: String,
+        entry: LinkEntry,
+    },
+    RevokeEntry {
+        identifier: String,
+        entry_id: u64,
+        effective_at: Timestamp,
+        reason: String,
+    },
+    SetDark {
+        identifier: String,
+        effective_at: Timestamp,
+    },
+    ClearDark {
+        identifier: String,
+        effective_at: Timestamp,
+    },
 }
 
 /// One record in the append-only resolver history.
@@ -186,14 +200,25 @@ impl LogRecord {
             Op::RegisterEntry { identifier, entry } => {
                 json!({"op": "register-entry", "identifier": identifier, "entry": entry.to_json()})
             }
-            Op::RevokeEntry { identifier, entry_id, effective_at, reason } => {
+            Op::RevokeEntry {
+                identifier,
+                entry_id,
+                effective_at,
+                reason,
+            } => {
                 json!({"op": "revoke-entry", "identifier": identifier, "entryId": entry_id,
                        "effectiveAt": effective_at.to_string(), "reason": reason})
             }
-            Op::SetDark { identifier, effective_at } => {
+            Op::SetDark {
+                identifier,
+                effective_at,
+            } => {
                 json!({"op": "set-dark", "identifier": identifier, "effectiveAt": effective_at.to_string()})
             }
-            Op::ClearDark { identifier, effective_at } => {
+            Op::ClearDark {
+                identifier,
+                effective_at,
+            } => {
                 json!({"op": "clear-dark", "identifier": identifier, "effectiveAt": effective_at.to_string()})
             }
         };
@@ -205,7 +230,10 @@ impl LogRecord {
 
     pub fn from_json(v: &Value) -> Result<LogRecord, String> {
         let obj = v.as_object().ok_or("log record must be an object")?;
-        let seq = obj.get("seq").and_then(Value::as_u64).ok_or("missing `seq`")?;
+        let seq = obj
+            .get("seq")
+            .and_then(Value::as_u64)
+            .ok_or("missing `seq`")?;
         let recorded_at = obj
             .get("recordedAt")
             .and_then(Value::as_str)
@@ -230,7 +258,10 @@ impl LogRecord {
             },
             Some("revoke-entry") => Op::RevokeEntry {
                 identifier: identifier("identifier")?,
-                entry_id: obj.get("entryId").and_then(Value::as_u64).ok_or("missing `entryId`")?,
+                entry_id: obj
+                    .get("entryId")
+                    .and_then(Value::as_u64)
+                    .ok_or("missing `entryId`")?,
                 effective_at: ts("effectiveAt")?,
                 reason: obj
                     .get("reason")
@@ -248,7 +279,11 @@ impl LogRecord {
             },
             _ => return Err("unknown `op`".to_string()),
         };
-        Ok(LogRecord { seq, recorded_at, op })
+        Ok(LogRecord {
+            seq,
+            recorded_at,
+            op,
+        })
     }
 }
 
@@ -327,12 +362,7 @@ impl Store {
             if existed {
                 store.replay(path)?;
             }
-            store.journal = Some(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)?,
-            );
+            store.journal = Some(OpenOptions::new().create(true).append(true).open(path)?);
         }
         Ok(store)
     }
@@ -394,21 +424,35 @@ impl Store {
                     .entries
                     .push(entry);
             }
-            Op::RevokeEntry { identifier, entry_id, effective_at, reason } => {
+            Op::RevokeEntry {
+                identifier,
+                entry_id,
+                effective_at,
+                reason,
+            } => {
                 self.ids
                     .entry(identifier.clone())
                     .or_default()
                     .revocations
                     .push((*entry_id, *effective_at, reason.clone()));
             }
-            Op::SetDark { identifier, effective_at } => {
+            Op::SetDark {
+                identifier,
+                effective_at,
+            } => {
                 let state = self.ids.entry(identifier.clone()).or_default();
                 // Only append an interval if none is open.
                 if !state.dark.iter().any(|d| d.to.is_none()) {
-                    state.dark.push(DarkInterval { from: *effective_at, to: None });
+                    state.dark.push(DarkInterval {
+                        from: *effective_at,
+                        to: None,
+                    });
                 }
             }
-            Op::ClearDark { identifier, effective_at } => {
+            Op::ClearDark {
+                identifier,
+                effective_at,
+            } => {
                 let state = self.ids.entry(identifier.clone()).or_default();
                 for d in state.dark.iter_mut() {
                     if d.to.is_none() {
@@ -420,11 +464,7 @@ impl Store {
     }
 
     /// Register entries for `identifier` (assigning fresh ids).
-    pub fn register(
-        &mut self,
-        identifier: &str,
-        entries: Vec<LinkEntry>,
-    ) -> Vec<LinkEntry> {
+    pub fn register(&mut self, identifier: &str, entries: Vec<LinkEntry>) -> Vec<LinkEntry> {
         let mut registered = Vec::new();
         for mut entry in entries {
             entry.id = self.next_entry_id;
@@ -439,7 +479,13 @@ impl Store {
     }
 
     /// Revoke one entry (append-only).
-    pub fn revoke(&mut self, identifier: &str, entry_id: u64, effective_at: Timestamp, reason: &str) {
+    pub fn revoke(
+        &mut self,
+        identifier: &str,
+        entry_id: u64,
+        effective_at: Timestamp,
+        reason: &str,
+    ) {
         self.record(Op::RevokeEntry {
             identifier: identifier.to_string(),
             entry_id,
@@ -491,11 +537,9 @@ impl Store {
             .iter()
             .map(|e| {
                 let mut v = e.to_json();
-                let revoked = state
-                    .revocations
-                    .iter()
-                    .find(|(id, _, _)| *id == e.id)
-                    .map(|(_, at, reason)| json!({"effectiveAt": at.to_string(), "reason": reason}));
+                let revoked = state.revocations.iter().find(|(id, _, _)| *id == e.id).map(
+                    |(_, at, reason)| json!({"effectiveAt": at.to_string(), "reason": reason}),
+                );
                 if let Some(r) = revoked {
                     if let Some(o) = v.as_object_mut() {
                         o.insert("revoked".into(), r);
@@ -507,9 +551,7 @@ impl Store {
         let dark: Vec<Value> = state
             .dark
             .iter()
-            .map(|d| {
-                json!({"from": d.from.to_string(), "to": d.to.map(|t| t.to_string())})
-            })
+            .map(|d| json!({"from": d.from.to_string(), "to": d.to.map(|t| t.to_string())}))
             .collect();
         Some(json!({
             "identifier": key,
@@ -579,14 +621,20 @@ mod tests {
     fn register_and_lookup() {
         let mut store = Store::open(None).unwrap();
         let t0 = ts("2026-01-01T00:00:00Z");
-        let registered = store.register("gs1:(01)06901234567892", vec![entry("https://a.example/x", t0)]);
+        let registered = store.register(
+            "gs1:(01)06901234567892",
+            vec![entry("https://a.example/x", t0)],
+        );
         assert_eq!(registered[0].id, 1);
         match store.lookup("gs1:(01)06901234567892", t0) {
             Lookup::Resolved(v) => assert_eq!(v.len(), 1),
             other => panic!("{other:?}"),
         }
         // before as-of -> known but empty
-        assert_eq!(store.lookup("gs1:(01)06901234567892", ts("2025-12-31T23:59:59Z")), Lookup::KnownEmpty);
+        assert_eq!(
+            store.lookup("gs1:(01)06901234567892", ts("2025-12-31T23:59:59Z")),
+            Lookup::KnownEmpty
+        );
         assert_eq!(store.lookup("gs1:(01)99999999999999", t0), Lookup::Absent);
     }
 
@@ -595,29 +643,47 @@ mod tests {
         let mut store = Store::open(None).unwrap();
         let t0 = ts("2026-01-01T00:00:00Z");
         let t1 = ts("2026-06-01T00:00:00Z");
-        store.register("gs1:(01)06901234567892", vec![entry("https://a.example/x", t0)]);
+        store.register(
+            "gs1:(01)06901234567892",
+            vec![entry("https://a.example/x", t0)],
+        );
         store.revoke("gs1:(01)06901234567892", 1, t1, "superseded");
-        assert!(matches!(store.lookup("gs1:(01)06901234567892", t1), Lookup::KnownEmpty));
+        assert!(matches!(
+            store.lookup("gs1:(01)06901234567892", t1),
+            Lookup::KnownEmpty
+        ));
         // historical query before the revocation still resolves
-        assert!(matches!(store.lookup("gs1:(01)06901234567892", ts("2026-03-01T00:00:00Z")), Lookup::Resolved(_)));
+        assert!(matches!(
+            store.lookup("gs1:(01)06901234567892", ts("2026-03-01T00:00:00Z")),
+            Lookup::Resolved(_)
+        ));
     }
 
     #[test]
     fn dark_intervals() {
         let mut store = Store::open(None).unwrap();
         let t0 = ts("2026-01-01T00:00:00Z");
-        store.register("iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1", vec![entry("https://a.example/x", t0)]);
+        store.register(
+            "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1",
+            vec![entry("https://a.example/x", t0)],
+        );
         store.record(Op::SetDark {
             identifier: "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1".into(),
             effective_at: ts("2026-02-01T00:00:00Z"),
         });
         assert_eq!(
-            store.lookup("iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1", ts("2026-03-01T00:00:00Z")),
+            store.lookup(
+                "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1",
+                ts("2026-03-01T00:00:00Z")
+            ),
             Lookup::Dark
         );
         // dark hides even historical (as-of before darkening) queries
         assert_eq!(
-            store.lookup("iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1", ts("2026-01-15T00:00:00Z")),
+            store.lookup(
+                "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1",
+                ts("2026-01-15T00:00:00Z")
+            ),
             Lookup::Dark
         );
         store.record(Op::ClearDark {
@@ -625,7 +691,10 @@ mod tests {
             effective_at: ts("2026-04-01T00:00:00Z"),
         });
         assert!(matches!(
-            store.lookup("iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1", ts("2026-05-01T00:00:00Z")),
+            store.lookup(
+                "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:1",
+                ts("2026-05-01T00:00:00Z")
+            ),
             Lookup::Resolved(_)
         ));
     }
@@ -636,8 +705,14 @@ mod tests {
         let mut e = entry("https://a.example/x", ts("2026-01-01T00:00:00Z"));
         e.expiry = Some(ts("2026-02-01T00:00:00Z"));
         store.register("gs1:(01)06901234567892", vec![e]);
-        assert!(matches!(store.lookup("gs1:(01)06901234567892", ts("2026-01-15T00:00:00Z")), Lookup::Resolved(_)));
-        assert_eq!(store.lookup("gs1:(01)06901234567892", ts("2026-02-02T00:00:00Z")), Lookup::KnownEmpty);
+        assert!(matches!(
+            store.lookup("gs1:(01)06901234567892", ts("2026-01-15T00:00:00Z")),
+            Lookup::Resolved(_)
+        ));
+        assert_eq!(
+            store.lookup("gs1:(01)06901234567892", ts("2026-02-02T00:00:00Z")),
+            Lookup::KnownEmpty
+        );
     }
 
     #[test]
@@ -649,7 +724,10 @@ mod tests {
         {
             let mut store = Store::open(Some(&path)).unwrap();
             let t0 = ts("2026-01-01T00:00:00Z");
-            store.register("gs1:(01)06901234567892", vec![entry("https://a.example/x", t0)]);
+            store.register(
+                "gs1:(01)06901234567892",
+                vec![entry("https://a.example/x", t0)],
+            );
             store.revoke("gs1:(01)06901234567892", 1, t0, "test");
             store.record(Op::SetDark {
                 identifier: "gs1:(01)4006381333931".into(),
@@ -658,7 +736,10 @@ mod tests {
         }
         let store = Store::open(Some(&path)).unwrap();
         assert_eq!(store.log_len(), 3);
-        assert_eq!(store.lookup("gs1:(01)4006381333931", ts("2026-06-01T00:00:00Z")), Lookup::Dark);
+        assert_eq!(
+            store.lookup("gs1:(01)4006381333931", ts("2026-06-01T00:00:00Z")),
+            Lookup::Dark
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -673,7 +754,10 @@ mod tests {
         .unwrap();
         let e = LinkEntry::from_admin_json(&v).unwrap();
         assert_eq!(e.languages, vec!["en".to_string(), "fr".to_string()]);
-        assert_eq!(e.profile.as_deref(), Some("urn:unidpp:profile:eu-espr-electronics"));
+        assert_eq!(
+            e.profile.as_deref(),
+            Some("urn:unidpp:profile:eu-espr-electronics")
+        );
         let e2 = LinkEntry::from_admin_json(&e.to_json()).unwrap();
         assert_eq!(e, e2);
         // wildcard normalizes to None

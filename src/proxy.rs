@@ -43,7 +43,13 @@ pub async fn try_upstream(
     ttl_secs: i64,
     req: UpstreamRequest<'_>,
 ) -> Response {
-    let UpstreamRequest { ident, ctx, link_type, asof, redirect } = req;
+    let UpstreamRequest {
+        ident,
+        ctx,
+        link_type,
+        asof,
+        redirect,
+    } = req;
     let key = ident.key();
     let now = Timestamp::now();
 
@@ -60,9 +66,13 @@ pub async fn try_upstream(
     // would pin a historical snapshot under the live key.
     if let Some(t) = asof {
         return match fetch(upstream, &key, Some(t)).await {
-            FetchOutcome::Entries(entries) if !entries.is_empty() => {
-                render(&entries, Stamp::Cached { fetched_at: now, cache: "miss" })
-            }
+            FetchOutcome::Entries(entries) if !entries.is_empty() => render(
+                &entries,
+                Stamp::Cached {
+                    fetched_at: now,
+                    cache: "miss",
+                },
+            ),
             FetchOutcome::Entries(_) | FetchOutcome::NotFound => not_found(),
             FetchOutcome::Error(e) => upstream_error(&e),
         };
@@ -77,36 +87,68 @@ pub async fn try_upstream(
     if let Some(ce) = cached {
         let fresh = now.secs.saturating_sub(ce.fetched_at.secs) < ttl_secs;
         if fresh {
-            return render(&ce.entries, Stamp::Cached { fetched_at: ce.fetched_at, cache: "hit" });
+            return render(
+                &ce.entries,
+                Stamp::Cached {
+                    fetched_at: ce.fetched_at,
+                    cache: "hit",
+                },
+            );
         }
         // TTL expired: revalidate; serve stale on upstream outage (I13).
         return match fetch(upstream, &key, None).await {
             FetchOutcome::Entries(entries) if !entries.is_empty() => {
-                store
-                    .lock()
-                    .expect("store poisoned")
-                    .cache_put(&key, CacheEntry { fetched_at: now, entries: entries.clone() });
-                render(&entries, Stamp::Cached { fetched_at: now, cache: "refresh" })
+                store.lock().expect("store poisoned").cache_put(
+                    &key,
+                    CacheEntry {
+                        fetched_at: now,
+                        entries: entries.clone(),
+                    },
+                );
+                render(
+                    &entries,
+                    Stamp::Cached {
+                        fetched_at: now,
+                        cache: "refresh",
+                    },
+                )
             }
             // A revalidated absence clears nothing (404s are not cached);
             // the stale snapshot keeps serving so availability does not
             // flap with the upstream.
-            FetchOutcome::Entries(_) | FetchOutcome::NotFound => {
-                render(&ce.entries, Stamp::Cached { fetched_at: ce.fetched_at, cache: "stale" })
-            }
-            FetchOutcome::Error(_) => {
-                render(&ce.entries, Stamp::Cached { fetched_at: ce.fetched_at, cache: "stale" })
-            }
+            FetchOutcome::Entries(_) | FetchOutcome::NotFound => render(
+                &ce.entries,
+                Stamp::Cached {
+                    fetched_at: ce.fetched_at,
+                    cache: "stale",
+                },
+            ),
+            FetchOutcome::Error(_) => render(
+                &ce.entries,
+                Stamp::Cached {
+                    fetched_at: ce.fetched_at,
+                    cache: "stale",
+                },
+            ),
         };
     }
 
     match fetch(upstream, &key, None).await {
         FetchOutcome::Entries(entries) if !entries.is_empty() => {
-            store
-                .lock()
-                .expect("store poisoned")
-                .cache_put(&key, CacheEntry { fetched_at: now, entries: entries.clone() });
-            render(&entries, Stamp::Cached { fetched_at: now, cache: "miss" })
+            store.lock().expect("store poisoned").cache_put(
+                &key,
+                CacheEntry {
+                    fetched_at: now,
+                    entries: entries.clone(),
+                },
+            );
+            render(
+                &entries,
+                Stamp::Cached {
+                    fetched_at: now,
+                    cache: "miss",
+                },
+            )
         }
         FetchOutcome::Entries(_) | FetchOutcome::NotFound => not_found(),
         FetchOutcome::Error(e) => upstream_error(&e),

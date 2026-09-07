@@ -80,7 +80,13 @@ fn language_score(link_langs: &[String], ctx: Option<&str>) -> Option<u32> {
         None => Some(if wildcard { 1 } else { 2 }),
         Some(_) if wildcard => Some(1),
         Some(c) if link_langs.iter().any(|l| l == c) => Some(4),
-        Some(c) if link_langs.iter().any(|l| primary_subtag(l) == primary_subtag(c)) => Some(3),
+        Some(c)
+            if link_langs
+                .iter()
+                .any(|l| primary_subtag(l) == primary_subtag(c)) =>
+        {
+            Some(3)
+        }
         Some(_) => None,
     }
 }
@@ -214,7 +220,12 @@ mod tests {
         let wc = routing("dpp", None, None, &[], None);
         assert_eq!(score_entry(&wc, &c, "dpp"), Some(1 + 1 + 1 + 1));
         // language primary-subtag fallback
-        let c2 = ctx(Some("urn:p:eu"), Some("consumer"), Some("fr-CA"), Some("EU"));
+        let c2 = ctx(
+            Some("urn:p:eu"),
+            Some("consumer"),
+            Some("fr-CA"),
+            Some("EU"),
+        );
         assert_eq!(score_entry(&eu, &c2, "dpp"), Some(4 + 4 + 4 + 3));
         // language mismatch kills the link
         let c3 = ctx(Some("urn:p:eu"), Some("consumer"), Some("ja"), Some("EU"));
@@ -255,6 +266,9 @@ mod tests {
             .map(|s| s.entry.href.as_str())
             .collect();
         // both specific links score 8 (tie -> registration order), wildcard 4
-        assert_eq!(scored, vec!["https://eu/", "https://jp/", "https://generic/"]);
+        assert_eq!(
+            scored,
+            vec!["https://eu/", "https://jp/", "https://generic/"]
+        );
     }
 }

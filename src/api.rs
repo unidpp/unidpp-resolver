@@ -185,7 +185,10 @@ pub(crate) enum Stamp {
     Local(Timestamp),
     /// Served from the intermediary cache, fetched at this instant
     /// (mirrors/caches carry as-of stamps).
-    Cached { fetched_at: Timestamp, cache: &'static str },
+    Cached {
+        fetched_at: Timestamp,
+        cache: &'static str,
+    },
 }
 
 /// The response view over a set of effective entries: ordered linkset
@@ -199,7 +202,10 @@ fn build_view(entries: &[LinkEntry], ctx: &RequestContext, link_type: &str) -> V
     let filtered: Vec<&LinkEntry> = if link_type == "all" {
         entries.iter().collect()
     } else {
-        entries.iter().filter(|e| e.link_type == link_type).collect()
+        entries
+            .iter()
+            .filter(|e| e.link_type == link_type)
+            .collect()
     };
     let ordered: Vec<LinkEntry> = if ctx.is_empty() {
         filtered.into_iter().cloned().collect()
@@ -227,7 +233,10 @@ fn build_view(entries: &[LinkEntry], ctx: &RequestContext, link_type: &str) -> V
         .into_iter()
         .next()
         .map(|s| (s.entry.href.clone(), s.entry.link_type.clone()));
-    View { ordered, default_link }
+    View {
+        ordered,
+        default_link,
+    }
 }
 
 fn stamp_value(stamp: &Stamp) -> (Timestamp, Option<&'static str>) {
@@ -276,10 +285,8 @@ pub(crate) fn render_redirect(
         return not_found();
     };
     let (t, cache) = stamp_value(&stamp);
-    let mut headers: Vec<(String, String)> = vec![
-        ("location".into(), href),
-        ("x-as-of".into(), t.to_string()),
-    ];
+    let mut headers: Vec<(String, String)> =
+        vec![("location".into(), href), ("x-as-of".into(), t.to_string())];
     if let Some(c) = cache {
         headers.push(("x-cache".into(), c.to_string()));
     }
@@ -288,15 +295,27 @@ pub(crate) fn render_redirect(
 
 /// Shared resolution flow: local store first (dark/KnownEmpty never
 /// reach the upstream), then the national intermediary, then the
-/// no-information 404.
+/// no-information 404. When the request carries no explicit context
+/// parameters, the Accept header negotiates the routing context
+/// (discovery protocol C4): the table-mapped context selects the
+/// default destination exactly like an explicit one.
 async fn resolve(
     app: &AppState,
     ident: &ResolvedIdentifier,
     ctx: &RequestContext,
+    accept: Option<&str>,
     link_type: &str,
     asof: Option<Timestamp>,
     redirect: bool,
 ) -> Response {
+    let negotiated: RequestContext = if ctx.is_empty() {
+        accept
+            .and_then(crate::negotiate::context_for_accept)
+            .unwrap_or_default()
+    } else {
+        ctx.clone()
+    };
+    let ctx = &negotiated;
     let t = asof.unwrap_or_else(Timestamp::now);
     let key = ident.key();
     let lookup = app.store.lock().expect("store poisoned").lookup(&key, t);
@@ -383,10 +402,14 @@ async fn healthz() -> Response {
 async fn resolve_query(
     State(app): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
+    let accept = headers.get("accept").and_then(|v| v.to_str().ok());
     let (carrier, identifier) = (params.get("carrier"), params.get("identifier"));
     let parsed: Result<ResolvedIdentifier, Response> = match (carrier, identifier) {
-        (Some(_), Some(_)) => Err(bad_request("`carrier` and `identifier` are mutually exclusive")),
+        (Some(_), Some(_)) => Err(bad_request(
+            "`carrier` and `identifier` are mutually exclusive",
+        )),
         (None, Some(i)) => parse_identifier_param(i).map_err(|e| bad_request(&e)),
         (Some(c), None) => match classify_carrier(c) {
             CarrierLookup::Ok(cp) => Ok(cp.identifier),
@@ -405,7 +428,7 @@ async fn resolve_query(
         Ok(a) => a,
         Err(resp) => return resp,
     };
-    resolve(&app, &ident, &ctx, &link_type, asof, false).await
+    resolve(&app, &ident, &ctx, accept, &link_type, asof, false).await
 }
 
 /// Fallback handler implementing the GS1-conventions-style path form:
@@ -420,6 +443,7 @@ async fn path_entry(
     req: Request,
 ) -> Response {
     let raw_path = req.uri().path().trim_start_matches('/');
+    let accept = req.headers().get("accept").and_then(|v| v.to_str().ok());
     if raw_path.is_empty() {
         return not_found();
     }
@@ -451,7 +475,7 @@ async fn path_entry(
         CarrierLookup::Invalid => return bad_request("invalid carrier (check digit / values)"),
         CarrierLookup::Unrecognized => return not_found(),
     };
-    resolve(&app, &ident, &ctx, &link_type, asof, !want_linkset).await
+    resolve(&app, &ident, &ctx, accept, &link_type, asof, !want_linkset).await
 }
 
 fn carrier_parse_json(cp: &CarrierParse, carrier: &str) -> Value {
@@ -679,9 +703,7 @@ async fn admin_revoke(
             .unwrap_or(false)
     };
     if !exists {
-        return bad_request(&format!(
-            "entry {entry_id} is not registered for `{key}`"
-        ));
+        return bad_request(&format!("entry {entry_id} is not registered for `{key}`"));
     }
     app.store
         .lock()
