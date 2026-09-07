@@ -1,0 +1,16 @@
+[package]
+name = "unidpp-resolver"
+description = "UniDPP federated resolver: RFC 9264 linksets, context routing (profile x role x language x region), dark identities, national-intermediary mode, carrier translation (GS1 Digital Link / GB/T 33993 / legacy EAN-13 / ISO-IEC 15459)"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/unidpp/unidpp-resolver"
+rust-version = "1.75"
+
+# Dependency-light on purpose (mirrors unidpp-core doctrine): axum/tokio
+# for serving, serde_json for wire documents. No tracing, no metrics,
+# no TLS stack (the reference intermediary speaks http:// upstream only).
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }
+serde_json = "1"
