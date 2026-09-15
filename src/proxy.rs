@@ -55,9 +55,9 @@ pub async fn try_upstream(
 
     let render = |entries: &[LinkEntry], stamp: Stamp| -> Response {
         if redirect {
-            render_redirect(entries, ctx, link_type, stamp)
+            render_redirect(entries, ctx, link_type, stamp, None)
         } else {
-            render_linkset_response(ident.anchor(), entries, ctx, link_type, stamp)
+            render_linkset_response(ident.anchor(), entries, ctx, link_type, stamp, None)
         }
     };
 

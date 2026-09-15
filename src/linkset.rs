@@ -57,8 +57,34 @@ pub fn link_object(anchor: &str, e: &LinkEntry) -> Value {
 /// Emit a full RFC 9264 JSON linkset document (2-space pretty print,
 /// matching the TS `emitLinkset` shape).
 pub fn emit_document(anchor: &str, entries: &[&LinkEntry]) -> String {
+    emit_document_with_supersession(anchor, entries, None)
+}
+
+/// Emit a linkset document that may carry an identity-rotation
+/// statement (TODO.impl 224): a superseded identifier resolves as
+/// usual **and** the document states the successor — rotation is a
+/// stated event, never a silent redirect and never an error (the
+/// MobileQR revisionHint lesson, machine-readable).
+pub fn emit_document_with_supersession(
+    anchor: &str,
+    entries: &[&LinkEntry],
+    supersession: Option<&crate::store::Supersession>,
+) -> String {
     let links: Vec<Value> = entries.iter().map(|e| link_object(anchor, e)).collect();
-    serde_json::to_string_pretty(&json!({ "linkset": links })).unwrap()
+    let mut doc = json!({ "linkset": links });
+    if let Some(s) = supersession {
+        if let Some(o) = doc.as_object_mut() {
+            o.insert("unidpp:superseded-by".into(), json!(s.successor));
+            o.insert("unidpp:superseded-effective-at".into(), json!(s.effective_at.to_string()));
+            if !s.authority.is_empty() {
+                o.insert("unidpp:superseded-by-authority".into(), json!(s.authority));
+            }
+            if !s.reason.is_empty() {
+                o.insert("unidpp:supersession-reason".into(), json!(s.reason));
+            }
+        }
+    }
+    serde_json::to_string_pretty(&doc).unwrap()
 }
 
 /// Parse a linkset document (TS `parseLinkset` semantics). Accepts a

@@ -982,3 +982,115 @@ async fn healthz_and_bad_requests() {
 
     server.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Identity rotation (TODO.impl 224 — the stated supersession)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rotation_is_stated_never_silent() {
+    let server = spawn().await;
+    let base = &server.base_url;
+    register(&server, EAN_ID, four_links()).await;
+
+    // Recording the rotation: the admin endpoint requires a known
+    // identifier and a non-empty successor.
+    let unknown = json!({"identifier": "gs1:(01)09999999999997", "successor": "urn:x",
+                         "effectiveAt": "2026-07-01T00:00:00Z"}).to_string();
+    let resp = request("POST", &format!("{base}/admin/supersessions"), Some(&unknown), None).await;
+    assert_eq!(resp.status, 400);
+    let empty = json!({"identifier": EAN_ID, "successor": "  ",
+                       "effectiveAt": "2026-07-01T00:00:00Z"}).to_string();
+    let resp = request("POST", &format!("{base}/admin/supersessions"), Some(&empty), None).await;
+    assert_eq!(resp.status, 400);
+    assert!(resp.body_string().contains("revocation, not a rotation"));
+
+    // The rotation record.
+    let body = json!({
+        "identifier": EAN_ID,
+        "successor": "urn:unidpp:passport:2nd-gen",
+        "effectiveAt": "2026-07-01T00:00:00Z",
+        "authority": "gs1-cn",
+        "reason": "re-issued digital identity"
+    })
+    .to_string();
+    let resp = request("POST", &format!("{base}/admin/supersessions"), Some(&body), None).await;
+    assert_eq!(resp.status, 200, "{}", resp.body_string());
+    assert_eq!(json_of(&resp)["supersededBy"], json!("urn:unidpp:passport:2nd-gen"));
+
+    // Before the effective instant: the linkset is unchanged (no
+    // statement — the rotation has not happened yet).
+    let resp = get(&format!("{base}/resolve?identifier={}&asof={}", enc(EAN_ID), AS_OF)).await;
+    assert_eq!(resp.status, 200);
+    assert!(!resp.body_string().contains("superseded-by"));
+
+    // After: the old identity still resolves AND states the successor —
+    // the linkset document carries the rotation block, the header names
+    // it, and the entries are untouched (rotation is not revocation).
+    let at = "2026-07-02T00:00:00Z";
+    let resp = get(&format!("{base}/resolve?identifier={}&asof={}", enc(EAN_ID), at)).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(
+        resp.header("x-unidpp-superseded-by").unwrap(),
+        "urn:unidpp:passport:2nd-gen"
+    );
+    let doc: Value = serde_json::from_str(&resp.body_string()).unwrap();
+    assert_eq!(doc["unidpp:superseded-by"], json!("urn:unidpp:passport:2nd-gen"));
+    assert_eq!(doc["unidpp:superseded-effective-at"], json!("2026-07-01T00:00:00Z"));
+    assert_eq!(doc["unidpp:superseded-by-authority"], json!("gs1-cn"));
+    assert_eq!(
+        doc["unidpp:supersession-reason"],
+        json!("re-issued digital identity")
+    );
+    assert_eq!(links_of(&resp).len(), 4, "entries survive the rotation");
+
+    // The 303 redirect form states it too (header — no body to carry it).
+    let resp = get(&format!("{base}/01/06901234567892")).await;
+    assert_eq!(resp.status, 303);
+    assert_eq!(
+        resp.header("x-unidpp-superseded-by").unwrap(),
+        "urn:unidpp:passport:2nd-gen"
+    );
+}
+
+#[tokio::test]
+async fn a_rotated_away_identity_states_where_it_went() {
+    // When the old identifier's entries are gone (revoked after the
+    // rotation), resolution is a stated 404 — the successor is named,
+    // never silence.
+    let server = spawn().await;
+    let base = &server.base_url;
+    let resp = register(&server, EAN_ID, four_links()).await;
+    let entry_count = json_of(&resp)["registered"].as_array().unwrap().len() as u64;
+    let body = json!({
+        "identifier": EAN_ID,
+        "successor": "urn:unidpp:passport:2nd-gen",
+        "effectiveAt": "2026-07-01T00:00:00Z",
+    })
+    .to_string();
+    request("POST", &format!("{base}/admin/supersessions"), Some(&body), None).await;
+    for id in 1..=entry_count {
+        let body = json!({"identifier": EAN_ID, "entryId": id,
+                          "effectiveAt": "2026-08-01T00:00:00Z"}).to_string();
+        request("POST", &format!("{base}/admin/revocations"), Some(&body), None).await;
+    }
+    // After the entries are gone: stated absence.
+    let resp = get(&format!("{base}/resolve?identifier={}&asof={}", enc(EAN_ID), "2026-09-01T00:00:00Z")).await;
+    assert_eq!(resp.status, 404);
+    let doc: Value = serde_json::from_str(&resp.body_string()).unwrap();
+    assert_eq!(doc["error"], json!("not found"));
+    assert_eq!(doc["unidpp:superseded-by"], json!("urn:unidpp:passport:2nd-gen"));
+    // Before the entries were revoked the rotation still stated on the
+    // resolving linkset (and before the rotation, a bare 404 once
+    // entries are gone: the statement only exists from its instant).
+    let resp = get(&format!("{base}/resolve?identifier={}&asof={}", enc(EAN_ID), "2026-07-15T00:00:00Z")).await;
+    assert_eq!(resp.status, 200);
+    assert!(resp.body_string().contains("superseded-by"));
+    // A dark rotated identity stays byte-identical 404 (I12 wins).
+    let body = json!({"identifier": EAN_ID, "dark": true,
+                      "effectiveAt": "2026-09-02T00:00:00Z"}).to_string();
+    request("POST", &format!("{base}/admin/dark"), Some(&body), None).await;
+    let resp = get(&format!("{base}/resolve?identifier={}&asof={}", enc(EAN_ID), "2026-09-03T00:00:00Z")).await;
+    assert_eq!(resp.status, 404);
+    assert_eq!(resp.body_string(), "{\"error\":\"not found\"}");
+}

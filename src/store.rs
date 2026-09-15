@@ -184,6 +184,13 @@ pub enum Op {
         identifier: String,
         effective_at: Timestamp,
     },
+    Supersede {
+        identifier: String,
+        successor: String,
+        effective_at: Timestamp,
+        authority: String,
+        reason: String,
+    },
 }
 
 /// One record in the append-only resolver history.
@@ -220,6 +227,16 @@ impl LogRecord {
                 effective_at,
             } => {
                 json!({"op": "clear-dark", "identifier": identifier, "effectiveAt": effective_at.to_string()})
+            }
+            Op::Supersede {
+                identifier,
+                successor,
+                effective_at,
+                authority,
+                reason,
+            } => {
+                json!({"op": "supersede", "identifier": identifier, "successor": successor,
+                       "effectiveAt": effective_at.to_string(), "authority": authority, "reason": reason})
             }
         };
         let mut m = base.as_object().cloned().unwrap_or_default();
@@ -277,6 +294,21 @@ impl LogRecord {
                 identifier: identifier("identifier")?,
                 effective_at: ts("effectiveAt")?,
             },
+            Some("supersede") => Op::Supersede {
+                identifier: identifier("identifier")?,
+                successor: identifier("successor")?,
+                effective_at: ts("effectiveAt")?,
+                authority: obj
+                    .get("authority")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                reason: obj
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            },
             _ => return Err("unknown `op`".to_string()),
         };
         Ok(LogRecord {
@@ -300,12 +332,57 @@ impl DarkInterval {
     }
 }
 
+/// An identity-rotation record (TODO.impl 224): this identifier is
+/// superseded by `successor`, effective at `effective_at`, stated by
+/// `authority`. The old identity still resolves during the rotation
+/// window — and every response states the successor. The MobileQR
+/// revisionHint lesson generalized: rotation is a *stated event*,
+/// never an error and never silence. Unlike darkness (I12: no
+/// information), a supersession is deliberately public — it is
+/// published content, the successor statement itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Supersession {
+    pub successor: String,
+    pub effective_at: Timestamp,
+    pub authority: String,
+    pub reason: String,
+}
+
+impl Supersession {
+    /// Effective at `t`?
+    fn effective(&self, t: Timestamp) -> bool {
+        self.effective_at <= t
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "successor": self.successor,
+            "effectiveAt": self.effective_at.to_string(),
+            "authority": self.authority,
+            "reason": self.reason,
+        })
+    }
+}
+
 /// Per-identifier resolver state (all append-only).
 #[derive(Debug, Clone, Default)]
 pub struct IdentifierState {
     pub entries: Vec<LinkEntry>,
     pub revocations: Vec<(u64, Timestamp, String)>,
     pub dark: Vec<DarkInterval>,
+    pub supersessions: Vec<Supersession>,
+}
+
+impl IdentifierState {
+    /// The supersession in force at `t`: the latest-declared one whose
+    /// effective instant has passed (a later record supersedes the
+    /// supersession — re-rotation is an append, never an edit).
+    pub fn supersession_at(&self, t: Timestamp) -> Option<&Supersession> {
+        self.supersessions
+            .iter()
+            .filter(|s| s.effective(t))
+            .max_by_key(|s| s.effective_at)
+    }
 }
 
 /// Result of a public lookup at instant `t`.
@@ -460,6 +537,24 @@ impl Store {
                     }
                 }
             }
+            Op::Supersede {
+                identifier,
+                successor,
+                effective_at,
+                authority,
+                reason,
+            } => {
+                self.ids
+                    .entry(identifier.clone())
+                    .or_default()
+                    .supersessions
+                    .push(Supersession {
+                        successor: successor.clone(),
+                        effective_at: *effective_at,
+                        authority: authority.clone(),
+                        reason: reason.clone(),
+                    });
+            }
         }
     }
 
@@ -492,6 +587,34 @@ impl Store {
             effective_at,
             reason: reason.to_string(),
         });
+    }
+
+    /// Record an identity rotation (append-only; TODO.impl 224): the
+    /// identifier is superseded by `successor` from `effective_at`,
+    /// stated by `authority`. The successor must be non-empty — an
+    /// unstated successor is a revocation, not a rotation.
+    pub fn supersede(
+        &mut self,
+        identifier: &str,
+        successor: &str,
+        effective_at: Timestamp,
+        authority: &str,
+        reason: &str,
+    ) {
+        self.record(Op::Supersede {
+            identifier: identifier.to_string(),
+            successor: successor.to_string(),
+            effective_at,
+            authority: authority.to_string(),
+            reason: reason.to_string(),
+        });
+    }
+
+    /// The supersession in force at `t`, if any (dark identifiers
+    /// never reach this — darkness is no-information, supersession is
+    /// published content).
+    pub fn supersession_at(&self, key: &str, t: Timestamp) -> Option<&Supersession> {
+        self.ids.get(key)?.supersession_at(t)
     }
 
     /// Public lookup at instant `t`.
@@ -553,10 +676,12 @@ impl Store {
             .iter()
             .map(|d| json!({"from": d.from.to_string(), "to": d.to.map(|t| t.to_string())}))
             .collect();
+        let supersessions: Vec<Value> = state.supersessions.iter().map(Supersession::to_json).collect();
         Some(json!({
             "identifier": key,
             "entries": entries,
             "darkIntervals": dark,
+            "supersessions": supersessions,
             "recordCount": self.log.len(),
         }))
     }
@@ -657,6 +782,60 @@ mod tests {
             store.lookup("gs1:(01)06901234567892", ts("2026-03-01T00:00:00Z")),
             Lookup::Resolved(_)
         ));
+    }
+
+    #[test]
+    fn supersession_states_the_successor_at_the_effective_instant() {
+        let mut store = Store::open(None).unwrap();
+        let t0 = ts("2026-01-01T00:00:00Z");
+        let rotation = ts("2026-07-01T00:00:00Z");
+        let key = "gs1:(01)06901234567892";
+        store.register(key, vec![entry("https://a.example/x", t0)]);
+        store.supersede(key, "urn:unidpp:id:v2", rotation, "gs1-cn", "re-issued digital identity");
+        // Before the rotation: no statement.
+        assert!(store.supersession_at(key, ts("2026-06-30T23:59:59Z")).is_none());
+        // At and after: the successor, authority and reason are stated.
+        let s = store.supersession_at(key, rotation).expect("effective");
+        assert_eq!(s.successor, "urn:unidpp:id:v2");
+        assert_eq!(s.authority, "gs1-cn");
+        assert_eq!(s.reason, "re-issued digital identity");
+        // The old identity still resolves during the rotation window —
+        // supersession never removes entries (that is a revocation).
+        assert!(matches!(store.lookup(key, rotation), Lookup::Resolved(_)));
+        // A later rotation record supersedes the supersession (append,
+        // never edit): the latest effective one governs.
+        let re_rotation = ts("2026-08-01T00:00:00Z");
+        store.supersede(key, "urn:unidpp:id:v3", re_rotation, "gs1-cn", "");
+        assert_eq!(
+            store.supersession_at(key, ts("2026-08-15T00:00:00Z")).unwrap().successor,
+            "urn:unidpp:id:v3"
+        );
+        // Between the two: the first still governs.
+        assert_eq!(
+            store.supersession_at(key, ts("2026-07-15T00:00:00Z")).unwrap().successor,
+            "urn:unidpp:id:v2"
+        );
+    }
+
+    #[test]
+    fn supersession_survives_the_journal_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("unidpp-resolver-sup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let t0 = ts("2026-01-01T00:00:00Z");
+        let rotation = ts("2026-07-01T00:00:00Z");
+        let key = "gs1:(01)06901234567892";
+        {
+            let mut store = Store::open(Some(&path)).unwrap();
+            store.register(key, vec![entry("https://a.example/x", t0)]);
+            store.supersede(key, "urn:unidpp:id:v2", rotation, "gs1-cn", "rotation");
+        }
+        let replayed = Store::open(Some(&path)).unwrap();
+        let s = replayed.supersession_at(key, rotation).expect("replayed");
+        assert_eq!(s.successor, "urn:unidpp:id:v2");
+        assert_eq!(s.reason, "rotation");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

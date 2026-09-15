@@ -252,6 +252,7 @@ pub(crate) fn render_linkset_response(
     ctx: &RequestContext,
     link_type: &str,
     stamp: Stamp,
+    supersession: Option<&crate::store::Supersession>,
 ) -> Response {
     let view = build_view(entries, ctx, link_type);
     let (t, cache) = stamp_value(&stamp);
@@ -259,6 +260,9 @@ pub(crate) fn render_linkset_response(
         ("content-type".into(), "application/linkset+json".into()),
         ("x-as-of".into(), t.to_string()),
     ];
+    if let Some(s) = supersession {
+        headers.push(("x-unidpp-superseded-by".into(), s.successor.clone()));
+    }
     if let Some(c) = cache {
         headers.push(("x-cache".into(), c.to_string()));
     }
@@ -270,7 +274,11 @@ pub(crate) fn render_linkset_response(
             headers.push(("link".into(), format!("<{href}>; rel=\"{rel}\"")));
         }
     }
-    let body = crate::linkset::emit_document(anchor, &view.ordered.iter().collect::<Vec<_>>());
+    let body = crate::linkset::emit_document_with_supersession(
+        anchor,
+        &view.ordered.iter().collect::<Vec<_>>(),
+        supersession,
+    );
     build_owned_response(StatusCode::OK, headers, body)
 }
 
@@ -279,6 +287,7 @@ pub(crate) fn render_redirect(
     ctx: &RequestContext,
     link_type: &str,
     stamp: Stamp,
+    supersession: Option<&crate::store::Supersession>,
 ) -> Response {
     let view = build_view(entries, ctx, link_type);
     let Some((href, _)) = view.default_link else {
@@ -287,6 +296,11 @@ pub(crate) fn render_redirect(
     let (t, cache) = stamp_value(&stamp);
     let mut headers: Vec<(String, String)> =
         vec![("location".into(), href), ("x-as-of".into(), t.to_string())];
+    // The rotation is stated on the redirect too (a header — the 303
+    // carries no body).
+    if let Some(s) = supersession {
+        headers.push(("x-unidpp-superseded-by".into(), s.successor.clone()));
+    }
     if let Some(c) = cache {
         headers.push(("x-cache".into(), c.to_string()));
     }
@@ -318,9 +332,41 @@ async fn resolve(
     let ctx = &negotiated;
     let t = asof.unwrap_or_else(Timestamp::now);
     let key = ident.key();
-    let lookup = app.store.lock().expect("store poisoned").lookup(&key, t);
+    let (lookup, supersession) = {
+        let store = app.store.lock().expect("store poisoned");
+        let lookup = store.lookup(&key, t);
+        // The rotation statement rides every non-dark outcome: dark is
+        // no-information (I12) and stays bare; everything else states
+        // the successor — a resolved old identity shows its notice, an
+        // emptied one states where it went (absence stated, never
+        // silence).
+        let supersession = match lookup {
+            Lookup::Dark => None,
+            _ => store.supersession_at(&key, t).cloned(),
+        };
+        (lookup, supersession)
+    };
     match lookup {
-        Lookup::Dark | Lookup::KnownEmpty => not_found(),
+        Lookup::Dark => not_found(),
+        Lookup::KnownEmpty | Lookup::Absent if supersession.is_some() => {
+            // The identifier's entries are gone (or never resolved
+            // here) but the rotation is published: state the successor
+            // instead of a bare 404.
+            let s = supersession.as_ref().expect("checked above");
+            build_response(
+                StatusCode::NOT_FOUND,
+                vec![("content-type", "application/json")],
+                json!({
+                    "error": "not found",
+                    "unidpp:superseded-by": s.successor,
+                    "unidpp:superseded-effective-at": s.effective_at.to_string(),
+                    "unidpp:superseded-by-authority": s.authority,
+                    "unidpp:supersession-reason": s.reason,
+                })
+                .to_string(),
+            )
+        }
+        Lookup::KnownEmpty => not_found(),
         Lookup::Absent => match &app.config.upstream {
             Some(upstream) => {
                 proxy::try_upstream(
@@ -342,9 +388,16 @@ async fn resolve(
         Lookup::Resolved(entries) => {
             let stamp = Stamp::Local(t);
             if redirect {
-                render_redirect(&entries, ctx, link_type, stamp)
+                render_redirect(&entries, ctx, link_type, stamp, supersession.as_ref())
             } else {
-                render_linkset_response(ident.anchor(), &entries, ctx, link_type, stamp)
+                render_linkset_response(
+                    ident.anchor(),
+                    &entries,
+                    ctx,
+                    link_type,
+                    stamp,
+                    supersession.as_ref(),
+                )
             }
         }
     }
@@ -767,6 +820,85 @@ async fn admin_dark(
     )
 }
 
+/// POST /admin/supersessions — record an identity rotation (TODO.impl
+/// 224): from `effectiveAt` the identifier's responses state the
+/// successor (linkset block + `X-UniDPP-Superseded-By`, and a stated
+/// 404 once its entries are gone). The identifier must already be
+/// known here — a rotation record is a statement *about* registered
+/// content, and refusing unknown identifiers keeps typos from
+/// manufacturing phantom history.
+async fn admin_supersede(
+    State(app): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(resp) = require_admin(&app, &headers) {
+        return resp;
+    }
+    let v = match parse_admin_body(&body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let ident = match parse_body_identifier(&v) {
+        Ok(i) => i,
+        Err(resp) => return resp,
+    };
+    let Some(successor) = v.get("successor").and_then(Value::as_str).map(str::trim) else {
+        return bad_request("`successor` is required");
+    };
+    if successor.is_empty() {
+        return bad_request("`successor` must not be empty — an unstated successor is a revocation, not a rotation");
+    }
+    let effective_at = match parse_body_effective_at(&v) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let authority = v
+        .get("authority")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let reason = v
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let key = ident.key();
+    let known = app
+        .store
+        .lock()
+        .expect("store poisoned")
+        .admin_view(&key)
+        .is_some();
+    if !known {
+        return bad_request(&format!(
+            "identifier `{key}` is not known here — register it before recording its rotation"
+        ));
+    }
+    let rec = {
+        let mut store = app.store.lock().expect("store poisoned");
+        store.supersede(&key, successor, effective_at, &authority, &reason);
+        store.log_json(1, store.log_len().saturating_sub(1))
+    };
+    let record = rec
+        .get("records")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    build_response(
+        StatusCode::OK,
+        vec![("content-type", "application/json")],
+        json!({
+            "identifier": key,
+            "supersededBy": successor,
+            "effectiveAt": effective_at.to_string(),
+            "record": record,
+        })
+        .to_string(),
+    )
+}
+
 async fn admin_log(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -833,6 +965,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .route("/admin/linksets", post(admin_register).put(admin_replace))
         .route("/admin/revocations", post(admin_revoke))
         .route("/admin/dark", post(admin_dark))
+        .route("/admin/supersessions", post(admin_supersede))
         .route("/admin/log", get(admin_log))
         .route("/admin/identifiers/{*identifier}", get(admin_identifier))
         .fallback(path_entry)

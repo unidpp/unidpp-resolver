@@ -88,6 +88,12 @@ pub fn discovery_json(config: &Config) -> Value {
             "format": "RFC 3339 UTC",
             "responseHeader": "X-As-Of"
         },
+        "identityRotation": {
+            "adminEndpoint": "POST /admin/supersessions {identifier, successor, effectiveAt, authority, reason}",
+            "statement": "once effective, every non-dark response states the successor: linkset members unidpp:superseded-by / unidpp:superseded-effective-at / unidpp:superseded-by-authority / unidpp:supersession-reason, header X-UniDPP-Superseded-By (incl. 303 redirects)",
+            "afterEntriesGone": "404 with the successor stated (absence stated, never silence)",
+            "darkWins": "a dark identifier stays byte-identical 404 (I12) — no rotation statement is published for dark identities"
+        },
         "defaultLinkRule": {
             "header": "Link: <uri>; rel=\"<linkType>\" on linkset responses",
             "redirect": "303 See Other on the bare path form"
