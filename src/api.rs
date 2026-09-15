@@ -3,7 +3,14 @@
 //! information). Public surface: discovery, resolution (query form,
 //! GS1-style path form, redirect form), carrier normalization; admin
 //! surface: linkset registration/replacement, revocations, dark
-//! identities, the append-only record log.
+//! identities, supersessions (identity rotation), same-subject
+//! correlations, the append-only record log.
+//!
+//! | Endpoint | Meaning |
+//! |---|---|
+//! | `GET /resolve?identifier=&asof=` | the linkset (rotation stated via `unidpp:superseded-by*`, counterparts via `unidpp:correlated-with` + `X-UniDPP-Correlated-With`) |
+//! | `POST /admin/supersessions` | record identity rotation: successor + effectiveAt + authority + reason; stated on every non-dark response |
+//! | `POST /admin/correlations` | record a same-subject correlation (spec 6.3 k): identifierA (known here) ↔ identifierB (well-formed, cross-registry); both sides indexed |
 //!
 //! the UniDPP design framework anchors: L5 resolution (linksets keyed by profile/role/
 //! language/region, default-link rule); S2 seam (mirrors, national
