@@ -191,6 +191,19 @@ pub enum Op {
         authority: String,
         reason: String,
     },
+    /// Record a same-subject correlation (TODO.impl 225 / spec 6.3 k):
+    /// identifier_a and identifier_b denote the same physical subject
+    /// under different schemes. Correlations accumulate (each is a
+    /// claim with its own assertor and evidence) — unlike
+    /// supersession they never govern, they state.
+    Correlate {
+        identifier_a: String,
+        identifier_b: String,
+        assertor: String,
+        evidence: String,
+        direction: String,
+        recorded_at: Timestamp,
+    },
 }
 
 /// One record in the append-only resolver history.
@@ -237,6 +250,18 @@ impl LogRecord {
             } => {
                 json!({"op": "supersede", "identifier": identifier, "successor": successor,
                        "effectiveAt": effective_at.to_string(), "authority": authority, "reason": reason})
+            }
+            Op::Correlate {
+                identifier_a,
+                identifier_b,
+                assertor,
+                evidence,
+                direction,
+                recorded_at,
+            } => {
+                json!({"op": "correlate", "identifierA": identifier_a, "identifierB": identifier_b,
+                       "assertor": assertor, "evidence": evidence, "direction": direction,
+                       "recordedAt": recorded_at.to_string()})
             }
         };
         let mut m = base.as_object().cloned().unwrap_or_default();
@@ -309,6 +334,26 @@ impl LogRecord {
                     .unwrap_or("")
                     .to_string(),
             },
+            Some("correlate") => Op::Correlate {
+                identifier_a: identifier("identifierA")?,
+                identifier_b: identifier("identifierB")?,
+                assertor: obj
+                    .get("assertor")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                evidence: obj
+                    .get("evidence")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                direction: obj
+                    .get("direction")
+                    .and_then(Value::as_str)
+                    .unwrap_or("mutual")
+                    .to_string(),
+                recorded_at: ts("recordedAt")?,
+            },
             _ => return Err("unknown `op`".to_string()),
         };
         Ok(LogRecord {
@@ -364,6 +409,39 @@ impl Supersession {
     }
 }
 
+/// A same-subject correlation (TODO.impl 225 / spec 6.3 k): this and
+/// the `other` identifier denote the same physical subject under
+/// different schemes — one thing, N sovereign DPPs, correlate never
+/// consolidate. Correlations accumulate as claims (each carries its
+/// assertor and evidence); they state, they never govern. Unlike
+/// supersession this is not a lifecycle event: both identities keep
+/// resolving independently, and each carries the correlation onward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Correlation {
+    /// The counterpart identifier's canonical key (as declared).
+    pub other: String,
+    /// Who asserts the same-subject claim.
+    pub assertor: String,
+    /// The basis (free text or an evidence URN).
+    pub evidence: String,
+    /// `mutual` | `from-a` | `from-b` — which side(s) assert it.
+    pub direction: String,
+    /// When the claim was recorded (it exists from this instant).
+    pub recorded_at: Timestamp,
+}
+
+impl Correlation {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "other": self.other,
+            "assertor": self.assertor,
+            "evidence": self.evidence,
+            "direction": self.direction,
+            "recordedAt": self.recorded_at.to_string(),
+        })
+    }
+}
+
 /// Per-identifier resolver state (all append-only).
 #[derive(Debug, Clone, Default)]
 pub struct IdentifierState {
@@ -371,6 +449,7 @@ pub struct IdentifierState {
     pub revocations: Vec<(u64, Timestamp, String)>,
     pub dark: Vec<DarkInterval>,
     pub supersessions: Vec<Supersession>,
+    pub correlations: Vec<Correlation>,
 }
 
 impl IdentifierState {
@@ -555,6 +634,29 @@ impl Store {
                         reason: reason.clone(),
                     });
             }
+            Op::Correlate {
+                identifier_a,
+                identifier_b,
+                assertor,
+                evidence,
+                direction,
+                recorded_at,
+            } => {
+                // Indexed on both sides: resolving either states the
+                // other (spec 6.3 k discovery).
+                for (here, other) in [
+                    (identifier_a.clone(), identifier_b.clone()),
+                    (identifier_b.clone(), identifier_a.clone()),
+                ] {
+                    self.ids.entry(here).or_default().correlations.push(Correlation {
+                        other,
+                        assertor: assertor.clone(),
+                        evidence: evidence.clone(),
+                        direction: direction.clone(),
+                        recorded_at: *recorded_at,
+                    });
+                }
+            }
         }
     }
 
@@ -610,11 +712,57 @@ impl Store {
         });
     }
 
+    /// Record a same-subject correlation (append-only; TODO.impl 225):
+    /// both identifiers are indexed — resolving either side states the
+    /// other. The claim carries its assertor, evidence and direction;
+    /// it exists from the recorded instant.
+    pub fn correlate(
+        &mut self,
+        identifier_a: &str,
+        identifier_b: &str,
+        assertor: &str,
+        evidence: &str,
+        direction: &str,
+    ) {
+        if identifier_a == identifier_b {
+            return; // a self-correlation states nothing
+        }
+        let recorded_at = Timestamp::now();
+        self.record(Op::Correlate {
+            identifier_a: identifier_a.to_string(),
+            identifier_b: identifier_b.to_string(),
+            assertor: assertor.to_string(),
+            evidence: evidence.to_string(),
+            direction: direction.to_string(),
+            recorded_at,
+        });
+    }
+
     /// The supersession in force at `t`, if any (dark identifiers
     /// never reach this — darkness is no-information, supersession is
     /// published content).
     pub fn supersession_at(&self, key: &str, t: Timestamp) -> Option<&Supersession> {
         self.ids.get(key)?.supersession_at(t)
+    }
+
+    /// The correlations in force at `t` for one side (each names its
+    /// counterpart): the discovery property of spec 6.3 k — a
+    /// verifier resolving either side finds the other. Sorted by
+    /// recorded instant then counterpart for determinism.
+    pub fn correlations_at(&self, key: &str, t: Timestamp) -> Vec<&Correlation> {
+        let Some(state) = self.ids.get(key) else {
+            return Vec::new();
+        };
+        let mut found: Vec<&Correlation> = state
+            .correlations
+            .iter()
+            .filter(|c| c.recorded_at <= t)
+            .collect();
+        found.sort_by(|a, b| {
+            (a.recorded_at, &a.other)
+                .cmp(&(b.recorded_at, &b.other))
+        });
+        found
     }
 
     /// Public lookup at instant `t`.
@@ -815,6 +963,57 @@ mod tests {
             store.supersession_at(key, ts("2026-07-15T00:00:00Z")).unwrap().successor,
             "urn:unidpp:id:v2"
         );
+    }
+
+    #[test]
+    fn correlations_index_both_sides_and_respect_as_of() {
+        let mut store = Store::open(None).unwrap();
+        let t0 = ts("2026-01-01T00:00:00Z");
+        let a = "gs1:(01)06901234567892";
+        let b = "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345";
+        store.register(a, vec![entry("https://a.example/x", t0)]);
+        // B is never registered locally — the cross-registry case: the
+        // correlation still indexes B's side.
+        store.correlate(a, b, "urn:unidpp:actor:oem", "same serial allocation", "mutual");
+        let now = Timestamp::now();
+        // Before the claim: nothing.
+        assert!(store.correlations_at(a, Timestamp::from_secs(now.secs - 10_000)).is_empty());
+        assert!(store.correlations_at(b, Timestamp::from_secs(now.secs - 10_000)).is_empty());
+        // From the claim: both sides state the counterpart.
+        let a_side = store.correlations_at(a, now);
+        let b_side = store.correlations_at(b, now);
+        assert_eq!(a_side.len(), 1);
+        assert_eq!(a_side[0].other, b);
+        assert_eq!(b_side.len(), 1);
+        assert_eq!(b_side[0].other, a);
+        assert_eq!(a_side[0].assertor, "urn:unidpp:actor:oem");
+        assert_eq!(a_side[0].direction, "mutual");
+        // Correlations accumulate (claims, not governors): a second
+        // assertor's claim coexists.
+        store.correlate(a, b, "urn:unidpp:actor:cab", "independent attestation", "from-a");
+        assert_eq!(store.correlations_at(a, now).len(), 2);
+    }
+
+    #[test]
+    fn correlations_survive_the_journal_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("unidpp-resolver-cor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let t0 = ts("2026-01-01T00:00:00Z");
+        let a = "gs1:(01)06901234567892";
+        let b = "gbt-33993:g/6901234567892/AB2026111";
+        {
+            let mut store = Store::open(Some(&path)).unwrap();
+            store.register(a, vec![entry("https://a.example/x", t0)]);
+            store.correlate(a, b, "urn:unidpp:actor:gs1-cn", "same batch", "mutual");
+        }
+        let replayed = Store::open(Some(&path)).unwrap();
+        let now = Timestamp::now();
+        assert_eq!(replayed.correlations_at(a, now).len(), 1);
+        assert_eq!(replayed.correlations_at(b, now)[0].other, a);
+        assert_eq!(replayed.correlations_at(b, now)[0].assertor, "urn:unidpp:actor:gs1-cn");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

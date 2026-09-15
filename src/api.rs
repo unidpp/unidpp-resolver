@@ -246,6 +246,19 @@ fn stamp_value(stamp: &Stamp) -> (Timestamp, Option<&'static str>) {
     }
 }
 
+/// The distinct counterpart identifiers, first-seen order (multiple
+/// claims about the same counterpart are one header entry — the
+/// linkset members carry the full claims).
+fn distinct_others(correlations: &[crate::store::Correlation]) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for c in correlations {
+        if !seen.contains(&c.other.as_str()) {
+            seen.push(c.other.as_str());
+        }
+    }
+    seen.join(", ")
+}
+
 pub(crate) fn render_linkset_response(
     anchor: &str,
     entries: &[LinkEntry],
@@ -253,6 +266,7 @@ pub(crate) fn render_linkset_response(
     link_type: &str,
     stamp: Stamp,
     supersession: Option<&crate::store::Supersession>,
+    correlations: &[crate::store::Correlation],
 ) -> Response {
     let view = build_view(entries, ctx, link_type);
     let (t, cache) = stamp_value(&stamp);
@@ -262,6 +276,9 @@ pub(crate) fn render_linkset_response(
     ];
     if let Some(s) = supersession {
         headers.push(("x-unidpp-superseded-by".into(), s.successor.clone()));
+    }
+    if !correlations.is_empty() {
+        headers.push(("x-unidpp-correlated-with".into(), distinct_others(correlations)));
     }
     if let Some(c) = cache {
         headers.push(("x-cache".into(), c.to_string()));
@@ -274,10 +291,11 @@ pub(crate) fn render_linkset_response(
             headers.push(("link".into(), format!("<{href}>; rel=\"{rel}\"")));
         }
     }
-    let body = crate::linkset::emit_document_with_supersession(
+    let body = crate::linkset::emit_document_full(
         anchor,
         &view.ordered.iter().collect::<Vec<_>>(),
         supersession,
+        correlations,
     );
     build_owned_response(StatusCode::OK, headers, body)
 }
@@ -288,6 +306,7 @@ pub(crate) fn render_redirect(
     link_type: &str,
     stamp: Stamp,
     supersession: Option<&crate::store::Supersession>,
+    correlations: &[crate::store::Correlation],
 ) -> Response {
     let view = build_view(entries, ctx, link_type);
     let Some((href, _)) = view.default_link else {
@@ -300,6 +319,9 @@ pub(crate) fn render_redirect(
     // carries no body).
     if let Some(s) = supersession {
         headers.push(("x-unidpp-superseded-by".into(), s.successor.clone()));
+    }
+    if !correlations.is_empty() {
+        headers.push(("x-unidpp-correlated-with".into(), distinct_others(correlations)));
     }
     if let Some(c) = cache {
         headers.push(("x-cache".into(), c.to_string()));
@@ -332,38 +354,51 @@ async fn resolve(
     let ctx = &negotiated;
     let t = asof.unwrap_or_else(Timestamp::now);
     let key = ident.key();
-    let (lookup, supersession) = {
+    let (lookup, supersession, correlations) = {
         let store = app.store.lock().expect("store poisoned");
         let lookup = store.lookup(&key, t);
-        // The rotation statement rides every non-dark outcome: dark is
-        // no-information (I12) and stays bare; everything else states
-        // the successor — a resolved old identity shows its notice, an
-        // emptied one states where it went (absence stated, never
-        // silence).
-        let supersession = match lookup {
-            Lookup::Dark => None,
-            _ => store.supersession_at(&key, t).cloned(),
-        };
-        (lookup, supersession)
+        // The rotation statement and the same-subject correlations
+        // ride every non-dark outcome: dark is no-information (I12)
+        // and stays bare; everything else states its successor and its
+        // counterparts — a resolved identity shows both, an emptied
+        // one states where it went and what it correlates with
+        // (absence stated, never silence).
+        match lookup {
+            Lookup::Dark => (lookup, None, Vec::new()),
+            _ => (
+                lookup,
+                store.supersession_at(&key, t).cloned(),
+                store
+                    .correlations_at(&key, t)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            ),
+        }
     };
     match lookup {
         Lookup::Dark => not_found(),
-        Lookup::KnownEmpty | Lookup::Absent if supersession.is_some() => {
+        Lookup::KnownEmpty | Lookup::Absent
+            if supersession.is_some() || !correlations.is_empty() =>
+        {
             // The identifier's entries are gone (or never resolved
-            // here) but the rotation is published: state the successor
+            // here) but its statements are published: state them
             // instead of a bare 404.
-            let s = supersession.as_ref().expect("checked above");
+            let mut body = json!({ "error": "not found" });
+            if let Some(s) = supersession.as_ref() {
+                body["unidpp:superseded-by"] = json!(s.successor);
+                body["unidpp:superseded-effective-at"] = json!(s.effective_at.to_string());
+                body["unidpp:superseded-by-authority"] = json!(s.authority);
+                body["unidpp:supersession-reason"] = json!(s.reason);
+            }
+            if !correlations.is_empty() {
+                body["unidpp:correlated-with"] =
+                    Value::Array(correlations.iter().map(|c| c.to_json()).collect());
+            }
             build_response(
                 StatusCode::NOT_FOUND,
                 vec![("content-type", "application/json")],
-                json!({
-                    "error": "not found",
-                    "unidpp:superseded-by": s.successor,
-                    "unidpp:superseded-effective-at": s.effective_at.to_string(),
-                    "unidpp:superseded-by-authority": s.authority,
-                    "unidpp:supersession-reason": s.reason,
-                })
-                .to_string(),
+                body.to_string(),
             )
         }
         Lookup::KnownEmpty => not_found(),
@@ -388,7 +423,14 @@ async fn resolve(
         Lookup::Resolved(entries) => {
             let stamp = Stamp::Local(t);
             if redirect {
-                render_redirect(&entries, ctx, link_type, stamp, supersession.as_ref())
+                render_redirect(
+                    &entries,
+                    ctx,
+                    link_type,
+                    stamp,
+                    supersession.as_ref(),
+                    &correlations,
+                )
             } else {
                 render_linkset_response(
                     ident.anchor(),
@@ -397,6 +439,7 @@ async fn resolve(
                     link_type,
                     stamp,
                     supersession.as_ref(),
+                    &correlations,
                 )
             }
         }
@@ -820,6 +863,96 @@ async fn admin_dark(
     )
 }
 
+/// POST /admin/correlations — record a same-subject correlation
+/// (TODO.impl 225 / spec 6.3 k): `identifierA` and `identifierB`
+/// denote one physical subject under different schemes. The local
+/// side (A) must be known here — a correlation is a statement about
+/// registered content; the counterpart (B) must be well-formed but
+/// need NOT be locally registered (the cross-registry reality: a
+/// national resolver may hold only one side of the claim). Direction
+/// is `mutual` | `from-a` | `from-b`.
+async fn admin_correlate(
+    State(app): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(resp) = require_admin(&app, &headers) {
+        return resp;
+    }
+    let v = match parse_admin_body(&body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let ident_a = match parse_body_identifier(&v) {
+        Ok(i) => i,
+        Err(resp) => return resp,
+    };
+    let key_a = ident_a.key();
+    let Some(raw_b) = v.get("identifierB").and_then(Value::as_str).map(str::trim) else {
+        return bad_request("`identifierB` is required");
+    };
+    if raw_b.is_empty() {
+        return bad_request("`identifierB` must not be empty");
+    }
+    // The counterpart must be well-formed; local registration is not
+    // required (cross-registry).
+    let key_b = match parse_identifier_param(raw_b) {
+        Ok(id) => id.key(),
+        Err(e) => return bad_request(&format!("`identifierB`: {e}")),
+    };
+    if key_b == key_a {
+        return bad_request("a self-correlation states nothing");
+    }
+    let direction = v.get("direction").and_then(Value::as_str).unwrap_or("mutual");
+    if !matches!(direction, "mutual" | "from-a" | "from-b") {
+        return bad_request("`direction` must be one of `mutual`, `from-a`, `from-b`");
+    }
+    let assertor = v
+        .get("assertor")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let evidence = v
+        .get("evidence")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let known = app
+        .store
+        .lock()
+        .expect("store poisoned")
+        .admin_view(&key_a)
+        .is_some();
+    if !known {
+        return bad_request(&format!(
+            "identifier `{key_a}` is not known here — register it before correlating it"
+        ));
+    }
+    let rec = {
+        let mut store = app.store.lock().expect("store poisoned");
+        store.correlate(&key_a, &key_b, &assertor, &evidence, direction);
+        store.log_json(1, store.log_len().saturating_sub(1))
+    };
+    let record = rec
+        .get("records")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    build_response(
+        StatusCode::CREATED,
+        vec![("content-type", "application/json")],
+        json!({
+            "identifierA": key_a,
+            "identifierB": key_b,
+            "assertor": assertor,
+            "direction": direction,
+            "record": record,
+        })
+        .to_string(),
+    )
+}
+
 /// POST /admin/supersessions — record an identity rotation (TODO.impl
 /// 224): from `effectiveAt` the identifier's responses state the
 /// successor (linkset block + `X-UniDPP-Superseded-By`, and a stated
@@ -966,6 +1099,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .route("/admin/revocations", post(admin_revoke))
         .route("/admin/dark", post(admin_dark))
         .route("/admin/supersessions", post(admin_supersede))
+        .route("/admin/correlations", post(admin_correlate))
         .route("/admin/log", get(admin_log))
         .route("/admin/identifiers/{*identifier}", get(admin_identifier))
         .fallback(path_entry)

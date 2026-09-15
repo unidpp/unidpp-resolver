@@ -70,10 +70,23 @@ pub fn emit_document_with_supersession(
     entries: &[&LinkEntry],
     supersession: Option<&crate::store::Supersession>,
 ) -> String {
+    emit_document_full(anchor, entries, supersession, &[])
+}
+
+/// Emit a linkset document that may carry a rotation statement and/or
+/// same-subject correlations (TODO.impl 225 / spec 6.3 k): the
+/// correlated-with members state the other sovereign identifiers this
+/// subject carries — one thing, N DPPs, correlate never consolidate.
+pub fn emit_document_full(
+    anchor: &str,
+    entries: &[&LinkEntry],
+    supersession: Option<&crate::store::Supersession>,
+    correlations: &[crate::store::Correlation],
+) -> String {
     let links: Vec<Value> = entries.iter().map(|e| link_object(anchor, e)).collect();
     let mut doc = json!({ "linkset": links });
-    if let Some(s) = supersession {
-        if let Some(o) = doc.as_object_mut() {
+    if let Some(o) = doc.as_object_mut() {
+        if let Some(s) = supersession {
             o.insert("unidpp:superseded-by".into(), json!(s.successor));
             o.insert("unidpp:superseded-effective-at".into(), json!(s.effective_at.to_string()));
             if !s.authority.is_empty() {
@@ -82,6 +95,12 @@ pub fn emit_document_with_supersession(
             if !s.reason.is_empty() {
                 o.insert("unidpp:supersession-reason".into(), json!(s.reason));
             }
+        }
+        if !correlations.is_empty() {
+            o.insert(
+                "unidpp:correlated-with".into(),
+                Value::Array(correlations.iter().map(|c| c.to_json()).collect()),
+            );
         }
     }
     serde_json::to_string_pretty(&doc).unwrap()

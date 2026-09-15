@@ -88,6 +88,12 @@ pub fn discovery_json(config: &Config) -> Value {
             "format": "RFC 3339 UTC",
             "responseHeader": "X-As-Of"
         },
+        "sameSubjectCorrelation": {
+            "adminEndpoint": "POST /admin/correlations {identifierA, identifierB, assertor, evidence, direction: mutual|from-a|from-b}",
+            "statement": "one thing, N sovereign DPPs (spec 6.3 k) — correlates never consolidates: resolving either side states the counterpart(s) as linkset member unidpp:correlated-with (other, assertor, evidence, direction, recordedAt) and header X-UniDPP-Correlated-With, including on the stated-404 path when local entries are gone",
+            "localRequirement": "identifierA must be registered here; identifierB must be well-formed but need not be (cross-registry)",
+            "darkWins": "a dark identifier serves no correlation (I12)"
+        },
         "identityRotation": {
             "adminEndpoint": "POST /admin/supersessions {identifier, successor, effectiveAt, authority, reason}",
             "statement": "once effective, every non-dark response states the successor: linkset members unidpp:superseded-by / unidpp:superseded-effective-at / unidpp:superseded-by-authority / unidpp:supersession-reason, header X-UniDPP-Superseded-By (incl. 303 redirects)",

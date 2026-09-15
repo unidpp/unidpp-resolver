@@ -1094,3 +1094,111 @@ async fn a_rotated_away_identity_states_where_it_went() {
     assert_eq!(resp.status, 404);
     assert_eq!(resp.body_string(), "{\"error\":\"not found\"}");
 }
+
+// ---------------------------------------------------------------------------
+// Same-subject correlations (TODO.impl 225 / spec 6.3 k — correlate,
+// never consolidate)
+// ---------------------------------------------------------------------------
+
+const FOREIGN_ID: &str = "iso-15459:urn:iso:std:iso-iec:15459:unidpp:inst:84120099012345";
+
+#[tokio::test]
+async fn one_subject_two_sovereign_dpps_each_states_the_other() {
+    let server = spawn().await;
+    let base = &server.base_url;
+    register(&server, EAN_ID, four_links()).await;
+
+    // Validation: unknown local side, malformed counterpart,
+    // self-correlation, bad direction — each stated.
+    let body = // a well-formed but never-registered GTIN (check digit valid)
+    json!({"identifier": "gs1:(01)09999999999994", "identifierB": FOREIGN_ID}).to_string();
+    let resp = request("POST", &format!("{base}/admin/correlations"), Some(&body), None).await;
+    assert_eq!(resp.status, 400);
+    assert!(resp.body_string().contains("not known here"));
+    let body = json!({"identifier": EAN_ID, "identifierB": "!!not an identifier!!"}).to_string();
+    assert_eq!(
+        request("POST", &format!("{base}/admin/correlations"), Some(&body), None).await.status,
+        400
+    );
+    let body = json!({"identifier": EAN_ID, "identifierB": EAN_ID}).to_string();
+    assert_eq!(
+        request("POST", &format!("{base}/admin/correlations"), Some(&body), None).await.status,
+        400
+    );
+    let body = json!({"identifier": EAN_ID, "identifierB": FOREIGN_ID, "direction": "up"}).to_string();
+    let resp = request("POST", &format!("{base}/admin/correlations"), Some(&body), None).await;
+    assert_eq!(resp.status, 400);
+    assert!(resp.body_string().contains("`direction`"));
+
+    // The correlation: the GS1 side known here, the GB/T side foreign
+    // (never registered) — the cross-registry case.
+    let body = json!({
+        "identifier": EAN_ID,
+        "identifierB": FOREIGN_ID,
+        "assertor": "urn:unidpp:actor:gs1-cn",
+        "evidence": "same batch allocation (two codes printed side by side)",
+        "direction": "mutual",
+    })
+    .to_string();
+    let resp = request("POST", &format!("{base}/admin/correlations"), Some(&body), None).await;
+    assert_eq!(resp.status, 201, "{}", resp.body_string());
+    assert_eq!(json_of(&resp)["identifierB"], json!(FOREIGN_ID));
+
+    // Side A resolves and states its counterpart — linkset member +
+    // header; the entries are untouched (correlate never consolidates).
+    // (No asof: the claim exists from its recorded instant — a query
+    // before that instant would correctly see nothing.)
+    let resp = get(&format!("{base}/resolve?identifier={}", enc(EAN_ID))).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(
+        resp.header("x-unidpp-correlated-with").unwrap(),
+        FOREIGN_ID
+    );
+    let doc: Value = serde_json::from_str(&resp.body_string()).unwrap();
+    let corr = &doc["unidpp:correlated-with"][0];
+    assert_eq!(corr["other"], json!(FOREIGN_ID));
+    assert_eq!(corr["assertor"], json!("urn:unidpp:actor:gs1-cn"));
+    assert_eq!(corr["direction"], json!("mutual"));
+    assert_eq!(links_of(&resp).len(), 4, "correlation changes nothing else");
+
+    // Side B — foreign, never registered here — resolves to a STATED
+    // 404 that names its counterpart: holding either side discovers
+    // the other.
+    let resp = get(&format!("{base}/resolve?identifier={}", enc(FOREIGN_ID))).await;
+    assert_eq!(resp.status, 404);
+    let doc: Value = serde_json::from_str(&resp.body_string()).unwrap();
+    assert_eq!(doc["error"], json!("not found"));
+    assert_eq!(doc["unidpp:correlated-with"][0]["other"], json!(EAN_ID));
+
+    // A second assertor's claim accumulates (claims, not governors).
+    let body = json!({
+        "identifier": EAN_ID,
+        "identifierB": FOREIGN_ID,
+        "assertor": "urn:unidpp:actor:cqc",
+        "evidence": "certificate 2025010914819023 joins both",
+        "direction": "from-a",
+    })
+    .to_string();
+    assert_eq!(
+        request("POST", &format!("{base}/admin/correlations"), Some(&body), None).await.status,
+        201
+    );
+    let resp = get(&format!("{base}/resolve?identifier={}", enc(EAN_ID))).await;
+    let doc: Value = serde_json::from_str(&resp.body_string()).unwrap();
+    assert_eq!(doc["unidpp:correlated-with"].as_array().unwrap().len(), 2);
+
+    // The redirect form states it too (header — no body).
+    let resp = get(&format!("{base}/01/06901234567892")).await;
+    assert_eq!(resp.status, 303);
+    assert_eq!(resp.header("x-unidpp-correlated-with").unwrap(), FOREIGN_ID);
+
+    // Darkness outranks correlation (I12): a dark identity serves
+    // byte-identical 404, no correlation leak.
+    let body = json!({"identifier": EAN_ID, "dark": true,
+                      "effectiveAt": "2026-10-01T00:00:00Z"}).to_string();
+    request("POST", &format!("{base}/admin/dark"), Some(&body), None).await;
+    let resp = get(&format!("{base}/resolve?identifier={}&asof={}", enc(EAN_ID), "2026-10-02T00:00:00Z")).await;
+    assert_eq!(resp.status, 404);
+    assert_eq!(resp.body_string(), "{\"error\":\"not found\"}");
+    let _ = FOREIGN_ID;
+}
