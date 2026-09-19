@@ -88,7 +88,10 @@ pub fn emit_document_full(
     if let Some(o) = doc.as_object_mut() {
         if let Some(s) = supersession {
             o.insert("unidpp:superseded-by".into(), json!(s.successor));
-            o.insert("unidpp:superseded-effective-at".into(), json!(s.effective_at.to_string()));
+            o.insert(
+                "unidpp:superseded-effective-at".into(),
+                json!(s.effective_at.to_string()),
+            );
             if !s.authority.is_empty() {
                 o.insert("unidpp:superseded-by-authority".into(), json!(s.authority));
             }

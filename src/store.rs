@@ -648,13 +648,17 @@ impl Store {
                     (identifier_a.clone(), identifier_b.clone()),
                     (identifier_b.clone(), identifier_a.clone()),
                 ] {
-                    self.ids.entry(here).or_default().correlations.push(Correlation {
-                        other,
-                        assertor: assertor.clone(),
-                        evidence: evidence.clone(),
-                        direction: direction.clone(),
-                        recorded_at: *recorded_at,
-                    });
+                    self.ids
+                        .entry(here)
+                        .or_default()
+                        .correlations
+                        .push(Correlation {
+                            other,
+                            assertor: assertor.clone(),
+                            evidence: evidence.clone(),
+                            direction: direction.clone(),
+                            recorded_at: *recorded_at,
+                        });
                 }
             }
         }
@@ -758,10 +762,7 @@ impl Store {
             .iter()
             .filter(|c| c.recorded_at <= t)
             .collect();
-        found.sort_by(|a, b| {
-            (a.recorded_at, &a.other)
-                .cmp(&(b.recorded_at, &b.other))
-        });
+        found.sort_by(|a, b| (a.recorded_at, &a.other).cmp(&(b.recorded_at, &b.other)));
         found
     }
 
@@ -824,7 +825,11 @@ impl Store {
             .iter()
             .map(|d| json!({"from": d.from.to_string(), "to": d.to.map(|t| t.to_string())}))
             .collect();
-        let supersessions: Vec<Value> = state.supersessions.iter().map(Supersession::to_json).collect();
+        let supersessions: Vec<Value> = state
+            .supersessions
+            .iter()
+            .map(Supersession::to_json)
+            .collect();
         Some(json!({
             "identifier": key,
             "entries": entries,
@@ -939,9 +944,17 @@ mod tests {
         let rotation = ts("2026-07-01T00:00:00Z");
         let key = "gs1:(01)06901234567892";
         store.register(key, vec![entry("https://a.example/x", t0)]);
-        store.supersede(key, "urn:unidpp:id:v2", rotation, "gs1-cn", "re-issued digital identity");
+        store.supersede(
+            key,
+            "urn:unidpp:id:v2",
+            rotation,
+            "gs1-cn",
+            "re-issued digital identity",
+        );
         // Before the rotation: no statement.
-        assert!(store.supersession_at(key, ts("2026-06-30T23:59:59Z")).is_none());
+        assert!(store
+            .supersession_at(key, ts("2026-06-30T23:59:59Z"))
+            .is_none());
         // At and after: the successor, authority and reason are stated.
         let s = store.supersession_at(key, rotation).expect("effective");
         assert_eq!(s.successor, "urn:unidpp:id:v2");
@@ -955,12 +968,18 @@ mod tests {
         let re_rotation = ts("2026-08-01T00:00:00Z");
         store.supersede(key, "urn:unidpp:id:v3", re_rotation, "gs1-cn", "");
         assert_eq!(
-            store.supersession_at(key, ts("2026-08-15T00:00:00Z")).unwrap().successor,
+            store
+                .supersession_at(key, ts("2026-08-15T00:00:00Z"))
+                .unwrap()
+                .successor,
             "urn:unidpp:id:v3"
         );
         // Between the two: the first still governs.
         assert_eq!(
-            store.supersession_at(key, ts("2026-07-15T00:00:00Z")).unwrap().successor,
+            store
+                .supersession_at(key, ts("2026-07-15T00:00:00Z"))
+                .unwrap()
+                .successor,
             "urn:unidpp:id:v2"
         );
     }
@@ -974,11 +993,21 @@ mod tests {
         store.register(a, vec![entry("https://a.example/x", t0)]);
         // B is never registered locally — the cross-registry case: the
         // correlation still indexes B's side.
-        store.correlate(a, b, "urn:unidpp:actor:oem", "same serial allocation", "mutual");
+        store.correlate(
+            a,
+            b,
+            "urn:unidpp:actor:oem",
+            "same serial allocation",
+            "mutual",
+        );
         let now = Timestamp::now();
         // Before the claim: nothing.
-        assert!(store.correlations_at(a, Timestamp::from_secs(now.secs - 10_000)).is_empty());
-        assert!(store.correlations_at(b, Timestamp::from_secs(now.secs - 10_000)).is_empty());
+        assert!(store
+            .correlations_at(a, Timestamp::from_secs(now.secs - 10_000))
+            .is_empty());
+        assert!(store
+            .correlations_at(b, Timestamp::from_secs(now.secs - 10_000))
+            .is_empty());
         // From the claim: both sides state the counterpart.
         let a_side = store.correlations_at(a, now);
         let b_side = store.correlations_at(b, now);
@@ -990,7 +1019,13 @@ mod tests {
         assert_eq!(a_side[0].direction, "mutual");
         // Correlations accumulate (claims, not governors): a second
         // assertor's claim coexists.
-        store.correlate(a, b, "urn:unidpp:actor:cab", "independent attestation", "from-a");
+        store.correlate(
+            a,
+            b,
+            "urn:unidpp:actor:cab",
+            "independent attestation",
+            "from-a",
+        );
         assert_eq!(store.correlations_at(a, now).len(), 2);
     }
 
@@ -1012,7 +1047,10 @@ mod tests {
         let now = Timestamp::now();
         assert_eq!(replayed.correlations_at(a, now).len(), 1);
         assert_eq!(replayed.correlations_at(b, now)[0].other, a);
-        assert_eq!(replayed.correlations_at(b, now)[0].assertor, "urn:unidpp:actor:gs1-cn");
+        assert_eq!(
+            replayed.correlations_at(b, now)[0].assertor,
+            "urn:unidpp:actor:gs1-cn"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
