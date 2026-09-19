@@ -6,11 +6,10 @@
 //! identities, supersessions (identity rotation), same-subject
 //! correlations, the append-only record log.
 //!
-//! | Endpoint | Meaning |
-//! |---|---|
-//! | `GET /resolve?identifier=&asof=` | the linkset (rotation stated via `unidpp:superseded-by*`, counterparts via `unidpp:correlated-with` + `X-UniDPP-Correlated-With`) |
-//! | `POST /admin/supersessions` | record identity rotation: successor + effectiveAt + authority + reason; stated on every non-dark response |
-//! | `POST /admin/correlations` | record a same-subject correlation (spec 6.3 k): identifierA (known here) ↔ identifierB (well-formed, cross-registry); both sides indexed |
+//! The endpoint table is the served contract itself: every handler
+//! carries its `#[utoipa::path]` declaration, the document is served
+//! at `/openapi.yaml` (and `/openapi.json`), browsable at `/docs`,
+//! and committed as the golden `openapi.yaml`.
 //!
 //! the UniDPP design framework anchors: L5 resolution (linksets keyed by profile/role/
 //! language/region, default-link rule); S2 seam (mirrors, national
@@ -31,6 +30,8 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::carrier::{
     classify_carrier, classify_path, parse_identifier_param, CarrierLookup, CarrierParse,
@@ -71,21 +72,39 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The environment variables this service consumes. This is the
+    /// deployment contract: unidpp-config renders exactly these names
+    /// for the resolver, and the contract document carries them as
+    /// `x-unidpp-env-keys`.
+    pub const ENV_KEYS: &'static [&'static str] = &[
+        "UNIDPP_BIND",
+        "UNIDPP_ADMIN_TOKEN",
+        "UNIDPP_UPSTREAM",
+        "UNIDPP_CACHE_TTL_SECS",
+        "UNIDPP_STATE_FILE",
+    ];
+
     pub fn from_env() -> Config {
         let mut c = Config::default();
-        if let Ok(bind) = std::env::var("UNIDPP_BIND") {
+        let mut vars: HashMap<&str, String> = HashMap::new();
+        for key in Self::ENV_KEYS {
+            if let Ok(value) = std::env::var(key) {
+                vars.insert(*key, value);
+            }
+        }
+        if let Some(bind) = vars.get("UNIDPP_BIND") {
             if let Ok(addr) = bind.parse() {
                 c.bind = addr;
             } else {
                 eprintln!("unidpp-resolver: ignoring bad UNIDPP_BIND `{bind}`");
             }
         }
-        if let Ok(token) = std::env::var("UNIDPP_ADMIN_TOKEN") {
+        if let Some(token) = vars.get("UNIDPP_ADMIN_TOKEN") {
             if !token.is_empty() {
-                c.admin_token = Some(token);
+                c.admin_token = Some(token.clone());
             }
         }
-        if let Ok(upstream) = std::env::var("UNIDPP_UPSTREAM") {
+        if let Some(upstream) = vars.get("UNIDPP_UPSTREAM") {
             if !upstream.is_empty() {
                 if upstream.starts_with("https://") {
                     eprintln!(
@@ -93,15 +112,15 @@ impl Config {
                          client speaks http only; upstream fetches will fail"
                     );
                 }
-                c.upstream = Some(upstream);
+                c.upstream = Some(upstream.clone());
             }
         }
-        if let Ok(ttl) = std::env::var("UNIDPP_CACHE_TTL_SECS") {
+        if let Some(ttl) = vars.get("UNIDPP_CACHE_TTL_SECS") {
             if let Ok(ttl) = ttl.parse() {
                 c.cache_ttl_secs = ttl;
             }
         }
-        if let Ok(path) = std::env::var("UNIDPP_STATE_FILE") {
+        if let Some(path) = vars.get("UNIDPP_STATE_FILE") {
             if !path.is_empty() {
                 c.state_file = Some(PathBuf::from(path));
             }
@@ -285,7 +304,10 @@ pub(crate) fn render_linkset_response(
         headers.push(("x-unidpp-superseded-by".into(), s.successor.clone()));
     }
     if !correlations.is_empty() {
-        headers.push(("x-unidpp-correlated-with".into(), distinct_others(correlations)));
+        headers.push((
+            "x-unidpp-correlated-with".into(),
+            distinct_others(correlations),
+        ));
     }
     if let Some(c) = cache {
         headers.push(("x-cache".into(), c.to_string()));
@@ -328,7 +350,10 @@ pub(crate) fn render_redirect(
         headers.push(("x-unidpp-superseded-by".into(), s.successor.clone()));
     }
     if !correlations.is_empty() {
-        headers.push(("x-unidpp-correlated-with".into(), distinct_others(correlations)));
+        headers.push((
+            "x-unidpp-correlated-with".into(),
+            distinct_others(correlations),
+        ));
     }
     if let Some(c) = cache {
         headers.push(("x-cache".into(), c.to_string()));
@@ -490,6 +515,15 @@ fn link_type_of(params: &HashMap<String, String>) -> String {
         .unwrap_or_else(|| "dpp".to_string())
 }
 
+/// Serve the discovery document.
+#[utoipa::path(
+    get,
+    path = "/",
+    tag = "resolution",
+    responses(
+        (status = 200, description = "The discovery document: identifier keys, carrier syntaxes, context routing, link types, content negotiation, entry points, rotation and correlation semantics, the national-intermediary posture and the enumeration-resistance statement", body = Value, content_type = "application/json"),
+    )
+)]
 async fn discovery(State(app): State<Arc<AppState>>) -> Response {
     build_response(
         StatusCode::OK,
@@ -498,10 +532,53 @@ async fn discovery(State(app): State<Arc<AppState>>) -> Response {
     )
 }
 
+/// Serve the discovery document at its well-known path.
+#[utoipa::path(
+    get,
+    path = "/.well-known/unidpp-resolver",
+    tag = "resolution",
+    responses(
+        (status = 200, description = "The discovery document (identical bytes to `GET /`)", body = Value, content_type = "application/json"),
+    )
+)]
+async fn discovery_wellknown(State(app): State<Arc<AppState>>) -> Response {
+    discovery(State(app)).await
+}
+
+/// Liveness probe.
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "resolution",
+    responses(
+        (status = 200, description = "The service is serving"),
+    )
+)]
 async fn healthz() -> Response {
     build_response(StatusCode::OK, vec![], "ok".to_string())
 }
 
+/// Resolve an identifier to its linkset.
+#[utoipa::path(
+    get,
+    path = "/resolve",
+    tag = "resolution",
+    params(
+        ("identifier" = Option<String>, Query, description = "The identifier in any supported syntax (ISO/IEC 15459 URN, GS1 element string or Digital Link, GB/T 33993 path or custom code, legacy EAN-13); mutually exclusive with `carrier`"),
+        ("carrier" = Option<String>, Query, description = "A complete carrier value; translated, then resolved — mutually exclusive with `identifier`"),
+        ("asof" = Option<String>, Query, description = "An RFC 3339 instant; the record is resolved as of that instant (I13)"),
+        ("profile" = Option<String>, Query, description = "Context dimension: profile"),
+        ("role" = Option<String>, Query, description = "Context dimension: verifier role"),
+        ("lang" = Option<String>, Query, description = "Context dimension: language (BCP 47, exact match then primary-subtag fallback)"),
+        ("region" = Option<String>, Query, description = "Context dimension: region"),
+        ("linkType" = Option<String>, Query, description = "The link type to resolve (default `dpp`; `all` returns every link)"),
+    ),
+    responses(
+        (status = 200, description = "The linkset document (RFC 9264), carrying the rotation and same-subject correlation statements as members and `X-UniDPP-*` headers; the `Link` header names the default link", body = Value, content_type = "application/linkset+json"),
+        (status = 400, description = "Unparseable identifier, invalid carrier check digit, or mutually exclusive parameters"),
+        (status = 404, description = "The no-information 404: unknown and dark identifiers answer byte-identically (I12)"),
+    )
+)]
 async fn resolve_query(
     State(app): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -596,6 +673,17 @@ fn carrier_parse_json(cp: &CarrierParse, carrier: &str) -> Value {
     })
 }
 
+/// Translate a carrier value to its canonical identifier.
+#[utoipa::path(
+    post,
+    path = "/normalize",
+    tag = "resolution",
+    request_body(content = Value, description = "The carrier under test: `{\"carrier\": \"...\"}`"),
+    responses(
+        (status = 200, description = "The parsed carrier: scheme, identifier components and the canonical form", body = Value, content_type = "application/json"),
+        (status = 400, description = "Invalid JSON, a missing `carrier`, an invalid check digit or an unrecognized syntax"),
+    )
+)]
 async fn normalize(body: String) -> Response {
     let parsed: Result<Value, _> = serde_json::from_str(&body);
     let v = match parsed {
@@ -665,6 +753,18 @@ fn parse_body_effective_at(v: &Value) -> Result<Timestamp, Response> {
     }
 }
 
+/// Register linkset entries for an identifier (append-only).
+#[utoipa::path(
+    post,
+    path = "/admin/linksets",
+    tag = "admin",
+    request_body(content = Value, description = "`{{\"identifier\": ..., \"links\": [entry, ...]}}` — at least one entry; `identifier` in any supported syntax"),
+    responses(
+        (status = 201, description = "Registered; the stored entries and the record count are stated", body = Value, content_type = "application/json"),
+        (status = 400, description = "Invalid JSON, an unparseable identifier, or an empty `links` array"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+    )
+)]
 async fn admin_register(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -704,6 +804,19 @@ async fn admin_register(
     )
 }
 
+/// Replace the effective linkset of an identifier (append-only: the
+/// currently effective entries are revoked, the new set appended).
+#[utoipa::path(
+    put,
+    path = "/admin/linksets",
+    tag = "admin",
+    request_body(content = Value, description = "`{{\"identifier\": ..., \"links\": [entry, ...]}}`; optional `effectiveAt` (RFC 3339, default now)"),
+    responses(
+        (status = 200, description = "Replaced; the revoked ids, the new entries and the record count are stated", body = Value, content_type = "application/json"),
+        (status = 400, description = "Invalid JSON, an unparseable identifier, or an empty `links` array"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+    )
+)]
 async fn admin_replace(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -763,6 +876,18 @@ async fn admin_replace(
     )
 }
 
+/// Revoke one linkset entry of an identifier.
+#[utoipa::path(
+    post,
+    path = "/admin/revocations",
+    tag = "admin",
+    request_body(content = Value, description = "`{{\"identifier\": ..., \"entryId\": <id>}}`; optional `effectiveAt` (RFC 3339, default now) and `reason` (default `revoked`)"),
+    responses(
+        (status = 200, description = "Revoked as of the effective instant", body = Value, content_type = "application/json"),
+        (status = 400, description = "An unknown identifier-entry pair or an invalid body"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+    )
+)]
 async fn admin_revoke(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -820,6 +945,19 @@ async fn admin_revoke(
     )
 }
 
+/// Set or clear the dark state of an identifier (I12: a dark
+/// identifier answers the byte-identical no-information 404).
+#[utoipa::path(
+    post,
+    path = "/admin/dark",
+    tag = "admin",
+    request_body(content = Value, description = "`{{\"identifier\": ..., \"dark\": <boolean>}}`; optional `effectiveAt` (RFC 3339, default now)"),
+    responses(
+        (status = 200, description = "The dark state is recorded; the sequence number is stated", body = Value, content_type = "application/json"),
+        (status = 400, description = "An invalid body"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+    )
+)]
 async fn admin_dark(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -878,6 +1016,21 @@ async fn admin_dark(
 /// need NOT be locally registered (the cross-registry reality: a
 /// national resolver may hold only one side of the claim). Direction
 /// is `mutual` | `from-a` | `from-b`.
+/// Record a same-subject correlation (spec 6.3 k): `identifierA`
+/// (known here) and `identifierB` (well-formed; local registration
+/// not required — the cross-registry case) denote one physical
+/// subject under different schemes. Correlates, never consolidates.
+#[utoipa::path(
+    post,
+    path = "/admin/correlations",
+    tag = "admin",
+    request_body(content = Value, description = "`{{\"identifierA\": ..., \"identifierB\": ...}}`; optional `assertor`, `evidence` and `direction` (`mutual` | `from-a` | `from-b`, default `mutual`)"),
+    responses(
+        (status = 201, description = "The correlation is recorded on both identifiers and is stated on every subsequent resolution of either side", body = Value, content_type = "application/json"),
+        (status = 400, description = "The local side is not known here, the counterpart is not well-formed, the pair is identical, or the direction is not one of the three"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+    )
+)]
 async fn admin_correlate(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -890,11 +1043,17 @@ async fn admin_correlate(
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    let ident_a = match parse_body_identifier(&v) {
-        Ok(i) => i,
-        Err(resp) => return resp,
+    let Some(raw_a) = v.get("identifierA").and_then(Value::as_str).map(str::trim) else {
+        return bad_request("`identifierA` is required");
     };
-    let key_a = ident_a.key();
+    if raw_a.is_empty() {
+        return bad_request("`identifierA` must not be empty");
+    }
+    // The local side must be well-formed AND known here.
+    let key_a = match parse_identifier_param(raw_a) {
+        Ok(id) => id.key(),
+        Err(e) => return bad_request(&format!("`identifierA`: {e}")),
+    };
     let Some(raw_b) = v.get("identifierB").and_then(Value::as_str).map(str::trim) else {
         return bad_request("`identifierB` is required");
     };
@@ -910,7 +1069,10 @@ async fn admin_correlate(
     if key_b == key_a {
         return bad_request("a self-correlation states nothing");
     }
-    let direction = v.get("direction").and_then(Value::as_str).unwrap_or("mutual");
+    let direction = v
+        .get("direction")
+        .and_then(Value::as_str)
+        .unwrap_or("mutual");
     if !matches!(direction, "mutual" | "from-a" | "from-b") {
         return bad_request("`direction` must be one of `mutual`, `from-a`, `from-b`");
     }
@@ -967,6 +1129,19 @@ async fn admin_correlate(
 /// known here — a rotation record is a statement *about* registered
 /// content, and refusing unknown identifiers keeps typos from
 /// manufacturing phantom history.
+/// Record an identity rotation: from `effectiveAt`, every non-dark
+/// response for the identifier states its successor.
+#[utoipa::path(
+    post,
+    path = "/admin/supersessions",
+    tag = "admin",
+    request_body(content = Value, description = "`{{\"identifier\": ..., \"successor\": ...}}`; optional `effectiveAt` (RFC 3339), `authority` and `reason`. The identifier must already be known here, and the successor must not be empty — an unstated successor is a revocation, not a rotation"),
+    responses(
+        (status = 200, description = "The rotation is recorded; the journal record is stated", body = Value, content_type = "application/json"),
+        (status = 400, description = "An unknown identifier, an empty successor, or an invalid body"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+    )
+)]
 async fn admin_supersede(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -987,7 +1162,9 @@ async fn admin_supersede(
         return bad_request("`successor` is required");
     };
     if successor.is_empty() {
-        return bad_request("`successor` must not be empty — an unstated successor is a revocation, not a rotation");
+        return bad_request(
+            "`successor` must not be empty — an unstated successor is a revocation, not a rotation",
+        );
     }
     let effective_at = match parse_body_effective_at(&v) {
         Ok(t) => t,
@@ -1039,6 +1216,20 @@ async fn admin_supersede(
     )
 }
 
+/// Read the append-only record log.
+#[utoipa::path(
+    get,
+    path = "/admin/log",
+    tag = "admin",
+    params(
+        ("limit" = Option<u64>, Query, description = "Records to return (default 100, maximum 10 000)"),
+        ("offset" = Option<u64>, Query, description = "Records to skip (default 0)"),
+    ),
+    responses(
+        (status = 200, description = "The journal window", body = Value, content_type = "application/json"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+    )
+)]
 async fn admin_log(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1068,6 +1259,18 @@ async fn admin_log(
     )
 }
 
+/// The operator's view of one identifier.
+#[utoipa::path(
+    get,
+    path = "/admin/identifiers/{identifier}",
+    tag = "admin",
+    params(("identifier" = String, Path, description = "The identifier key, in any supported syntax")),
+    responses(
+        (status = 200, description = "The identifier's entries, dark state, rotation and correlations", body = Value, content_type = "application/json"),
+        (status = 401, description = "A bearer token is configured and the request does not carry it"),
+        (status = 404, description = "Not known here (the no-information form)"),
+    )
+)]
 async fn admin_identifier(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1092,23 +1295,92 @@ async fn admin_identifier(
 }
 
 // ---------------------------------------------------------------------------
+// Interface contract
+// ---------------------------------------------------------------------------
+
+/// The routed paths, declared once. The router routes by these
+/// constants, the contract document is tested against them, and no
+/// route may be declared with a raw literal (the gates enforce both).
+pub mod paths {
+    pub const ROOT: &str = "/";
+    pub const WELLKNOWN: &str = "/.well-known/unidpp-resolver";
+    pub const HEALTHZ: &str = "/healthz";
+    pub const RESOLVE: &str = "/resolve";
+    pub const NORMALIZE: &str = "/normalize";
+    pub const ADMIN_LINKSETS: &str = "/admin/linksets";
+    pub const ADMIN_REVOCATIONS: &str = "/admin/revocations";
+    pub const ADMIN_DARK: &str = "/admin/dark";
+    pub const ADMIN_SUPERSESSIONS: &str = "/admin/supersessions";
+    pub const ADMIN_CORRELATIONS: &str = "/admin/correlations";
+    pub const ADMIN_LOG: &str = "/admin/log";
+    pub const ADMIN_IDENTIFIER: &str = "/admin/identifiers/{*identifier}";
+    /// The contract document itself (not an operation of the API).
+    pub const CONTRACT_YAML: &str = "/openapi.yaml";
+}
+
+/// The OpenAPI model: one declaration per handler (`#[utoipa::path]`),
+/// from which the served contract, the golden file and Swagger UI all
+/// derive.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "UniDPP resolver",
+        version = env!("CARGO_PKG_VERSION"),
+        description = "Federated digital product passport resolver: RFC 9264 linksets, context routing (profile x role x language x region), carrier translation (GS1 Digital Link, GB/T 33993, legacy EAN-13, ISO/IEC 15459), dark identities, identity rotation and same-subject correlation. The GS1-style path form (`/<carrier-key>[linkset]`, 303 redirects) is served by the router fallback and carries no operation of its own. Admin operations require `Authorization: Bearer <UNIDPP_ADMIN_TOKEN>` where a token is configured.",
+        license(name = "Apache-2.0", identifier = "Apache-2.0"),
+    ),
+    paths(
+        discovery, discovery_wellknown, healthz, resolve_query, normalize,
+        admin_register, admin_replace, admin_revoke, admin_dark,
+        admin_supersede, admin_correlate, admin_log, admin_identifier,
+    ),
+    tags(
+        (name = "resolution", description = "Discovery, resolution and carrier normalization"),
+        (name = "admin", description = "The operator surface: linksets, revocations, dark identities, rotation, correlation, the record log"),
+    )
+)]
+struct ApiDoc;
+
+/// The contract document: the OpenAPI model plus the deployment keys
+/// (`x-unidpp-env-keys`). Served at `/openapi.yaml` and committed as
+/// the golden `openapi.yaml`.
+pub fn contract_yaml() -> String {
+    let mut doc = serde_json::to_value(ApiDoc::openapi()).expect("contract serializes");
+    doc["info"]["x-unidpp-env-keys"] = json!(Config::ENV_KEYS);
+    serde_yaml::to_string(&doc).expect("contract renders as YAML")
+}
+
+async fn openapi_yaml() -> Response {
+    build_response(
+        StatusCode::OK,
+        vec![("content-type", "application/yaml")],
+        contract_yaml(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Server wiring
 // ---------------------------------------------------------------------------
 
 pub fn router(app: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(discovery))
-        .route("/.well-known/unidpp-resolver", get(discovery))
-        .route("/healthz", get(healthz))
-        .route("/resolve", get(resolve_query))
-        .route("/normalize", post(normalize))
-        .route("/admin/linksets", post(admin_register).put(admin_replace))
-        .route("/admin/revocations", post(admin_revoke))
-        .route("/admin/dark", post(admin_dark))
-        .route("/admin/supersessions", post(admin_supersede))
-        .route("/admin/correlations", post(admin_correlate))
-        .route("/admin/log", get(admin_log))
-        .route("/admin/identifiers/{*identifier}", get(admin_identifier))
+        .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
+        .route(paths::ROOT, get(discovery))
+        .route(paths::WELLKNOWN, get(discovery_wellknown))
+        .route(paths::HEALTHZ, get(healthz))
+        .route(paths::RESOLVE, get(resolve_query))
+        .route(paths::NORMALIZE, post(normalize))
+        .route(
+            paths::ADMIN_LINKSETS,
+            post(admin_register).put(admin_replace),
+        )
+        .route(paths::ADMIN_REVOCATIONS, post(admin_revoke))
+        .route(paths::ADMIN_DARK, post(admin_dark))
+        .route(paths::ADMIN_SUPERSESSIONS, post(admin_supersede))
+        .route(paths::ADMIN_CORRELATIONS, post(admin_correlate))
+        .route(paths::ADMIN_LOG, get(admin_log))
+        .route(paths::ADMIN_IDENTIFIER, get(admin_identifier))
+        .route(paths::CONTRACT_YAML, get(openapi_yaml))
         .fallback(path_entry)
         .with_state(app)
 }
@@ -1163,5 +1435,178 @@ impl TestServer {
         if let Some(join) = self.join.take() {
             let _ = join.await;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contract gates
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod contract_gates {
+    use super::*;
+    use crate::httpc::{request, Url};
+    use std::time::Duration;
+
+    /// The contract form of a routed path: the router's tail
+    /// wildcard (`{*identifier}`) is a captured parameter in the
+    /// document (`{identifier}`).
+    fn to_doc(path: &str) -> String {
+        path.replace("{*", "{")
+    }
+
+    /// The contract paths with their documented methods.
+    fn documented() -> std::collections::BTreeMap<String, Vec<String>> {
+        let doc: Value = serde_yaml::from_str(&contract_yaml()).expect("contract parses");
+        doc["paths"]
+            .as_object()
+            .expect("paths object")
+            .iter()
+            .map(|(path, item)| {
+                let methods = VERBS
+                    .iter()
+                    .filter(|v| item.get(*v).is_some())
+                    .map(|v| v.to_string())
+                    .collect();
+                (path.clone(), methods)
+            })
+            .collect()
+    }
+
+    const VERBS: [&str; 5] = ["get", "post", "put", "delete", "patch"];
+
+    /// The routed paths, from the constants the router routes by
+    /// (the contract route itself carries no operation).
+    fn routed() -> Vec<&'static str> {
+        [
+            paths::ROOT,
+            paths::WELLKNOWN,
+            paths::HEALTHZ,
+            paths::RESOLVE,
+            paths::NORMALIZE,
+            paths::ADMIN_LINKSETS,
+            paths::ADMIN_REVOCATIONS,
+            paths::ADMIN_DARK,
+            paths::ADMIN_SUPERSESSIONS,
+            paths::ADMIN_CORRELATIONS,
+            paths::ADMIN_LOG,
+            paths::ADMIN_IDENTIFIER,
+        ]
+        .to_vec()
+    }
+
+    #[test]
+    fn the_golden_matches_the_committed_contract() {
+        assert_eq!(contract_yaml(), include_str!("../openapi.yaml"));
+    }
+
+    #[test]
+    #[ignore = "regenerates openapi.yaml after a route change: cargo test -- --ignored export"]
+    fn export_golden() {
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.yaml"),
+            contract_yaml(),
+        )
+        .expect("golden written");
+    }
+
+    #[test]
+    fn every_routed_path_is_documented() {
+        let doc = documented();
+        for path in routed() {
+            let key = to_doc(path);
+            assert!(
+                doc.contains_key(&key),
+                "routed but undocumented: {path} (contract speaks `{key}`)"
+            );
+        }
+    }
+
+    #[test]
+    fn every_documented_path_is_routed() {
+        let routed: Vec<String> = routed().iter().map(|p| to_doc(p)).collect();
+        for path in documented().keys() {
+            assert!(routed.contains(path), "documented but not routed: {path}");
+        }
+    }
+
+    #[test]
+    fn routes_are_declared_by_constant_not_literal() {
+        let src = include_str!("api.rs");
+        assert_eq!(
+            src.matches(".route(\"").count(),
+            0,
+            "route paths come from the paths:: constants"
+        );
+    }
+
+    /// The `VERB /path` endpoint references embedded in the discovery
+    /// document must all be contracted operations.
+    #[test]
+    fn discovery_names_only_contracted_endpoints() {
+        let doc = discovery_json(&Config::default()).to_string();
+        let documented: Vec<String> = documented().into_keys().collect();
+        for verb in VERBS.map(str::to_uppercase) {
+            let mut rest = doc.as_str();
+            while let Some(pos) = rest.find(&verb) {
+                let after = &rest[pos + verb.len()..];
+                rest = after;
+                let Some(path) = after.strip_prefix(" /") else {
+                    continue;
+                };
+                let taken: String = path
+                    .chars()
+                    .take_while(|c| !matches!(c, ' ' | '"' | '{' | '<'))
+                    .collect();
+                let path = taken.split('?').next().unwrap_or("").to_string();
+                if path.is_empty() {
+                    continue;
+                }
+                assert!(
+                    documented.contains(&format!("/{path}")),
+                    "discovery names `{verb} /{path}` — no such operation in the contract"
+                );
+            }
+        }
+    }
+
+    /// The behavioral half: every documented operation answers
+    /// anything but 405, and every undocumented method on a documented
+    /// path answers 405 — on the live router.
+    #[tokio::test]
+    async fn the_router_serves_the_contract_exactly() {
+        let ts = TestServer::spawn(Config::default())
+            .await
+            .expect("test server");
+        for (path, methods) in documented() {
+            let concrete = path.replace("{identifier}", "probe-x");
+            for verb in VERBS {
+                let resp = request(
+                    &verb.to_uppercase(),
+                    &Url::parse(&format!("{}{concrete}", ts.base_url)).expect("probe url"),
+                    &[],
+                    if verb == "get" {
+                        None
+                    } else {
+                        Some(b"{}".as_slice())
+                    },
+                    Duration::from_secs(5),
+                )
+                .await
+                .expect("probe answered");
+                if methods.contains(&verb.to_string()) {
+                    assert_ne!(
+                        resp.status, 405,
+                        "{verb} {concrete}: the contract says routed, the router says otherwise"
+                    );
+                } else {
+                    assert_eq!(
+                        resp.status, 405,
+                        "{verb} {concrete}: served but not in the contract"
+                    );
+                }
+            }
+        }
+        ts.stop().await;
     }
 }

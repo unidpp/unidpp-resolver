@@ -13,7 +13,6 @@ pub fn discovery_json(config: &Config) -> Value {
     json!({
         "profile": "https://unidpp.org/ns/resolver/1.0",
         "service": "unidpp-resolver",
-        "version": env!("CARGO_PKG_VERSION"),
         "build_id": option_env!("UNIDPP_BUILD_ID").unwrap_or("dev"),
         "version": env!("CARGO_PKG_VERSION"),
         "linkset": {

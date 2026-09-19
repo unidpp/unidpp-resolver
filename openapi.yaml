@@ -1,0 +1,349 @@
+components: {}
+info:
+  description: 'Federated digital product passport resolver: RFC 9264 linksets, context routing (profile x role x language x region), carrier translation (GS1 Digital Link, GB/T 33993, legacy EAN-13, ISO/IEC 15459), dark identities, identity rotation and same-subject correlation. The GS1-style path form (`/<carrier-key>[linkset]`, 303 redirects) is served by the router fallback and carries no operation of its own. Admin operations require `Authorization: Bearer <UNIDPP_ADMIN_TOKEN>` where a token is configured.'
+  license:
+    identifier: Apache-2.0
+    name: Apache-2.0
+  title: UniDPP resolver
+  version: 0.1.0
+  x-unidpp-env-keys:
+  - UNIDPP_BIND
+  - UNIDPP_ADMIN_TOKEN
+  - UNIDPP_UPSTREAM
+  - UNIDPP_CACHE_TTL_SECS
+  - UNIDPP_STATE_FILE
+openapi: 3.1.0
+paths:
+  /:
+    get:
+      operationId: discovery
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The discovery document: identifier keys, carrier syntaxes, context routing, link types, content negotiation, entry points, rotation and correlation semantics, the national-intermediary posture and the enumeration-resistance statement'
+      summary: Serve the discovery document.
+      tags:
+      - resolution
+  /.well-known/unidpp-resolver:
+    get:
+      operationId: discovery_wellknown
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The discovery document (identical bytes to `GET /`)
+      summary: Serve the discovery document at its well-known path.
+      tags:
+      - resolution
+  /admin/correlations:
+    post:
+      operationId: admin_correlate
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`{{"identifierA": ..., "identifierB": ...}}`; optional `assertor`, `evidence` and `direction` (`mutual` | `from-a` | `from-b`, default `mutual`)'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: {}
+          description: The correlation is recorded on both identifiers and is stated on every subsequent resolution of either side
+        '400':
+          description: The local side is not known here, the counterpart is not well-formed, the pair is identical, or the direction is not one of the three
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: |-
+        POST /admin/correlations — record a same-subject correlation
+        (TODO.impl 225 / spec 6.3 k): `identifierA` and `identifierB`
+        denote one physical subject under different schemes. The local
+        side (A) must be known here — a correlation is a statement about
+        registered content; the counterpart (B) must be well-formed but
+        need NOT be locally registered (the cross-registry reality: a
+        national resolver may hold only one side of the claim). Direction
+        is `mutual` | `from-a` | `from-b`.
+        Record a same-subject correlation (spec 6.3 k): `identifierA`
+        (known here) and `identifierB` (well-formed; local registration
+        not required — the cross-registry case) denote one physical
+        subject under different schemes. Correlates, never consolidates.
+      tags:
+      - admin
+  /admin/dark:
+    post:
+      operationId: admin_dark
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`{{"identifier": ..., "dark": <boolean>}}`; optional `effectiveAt` (RFC 3339, default now)'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The dark state is recorded; the sequence number is stated
+        '400':
+          description: An invalid body
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: |-
+        Set or clear the dark state of an identifier (I12: a dark
+        identifier answers the byte-identical no-information 404).
+      tags:
+      - admin
+  /admin/identifiers/{identifier}:
+    get:
+      operationId: admin_identifier
+      parameters:
+      - description: The identifier key, in any supported syntax
+        in: path
+        name: identifier
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The identifier's entries, dark state, rotation and correlations
+        '401':
+          description: A bearer token is configured and the request does not carry it
+        '404':
+          description: Not known here (the no-information form)
+      summary: The operator's view of one identifier.
+      tags:
+      - admin
+  /admin/linksets:
+    post:
+      operationId: admin_register
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`{{"identifier": ..., "links": [entry, ...]}}` — at least one entry; `identifier` in any supported syntax'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: {}
+          description: Registered; the stored entries and the record count are stated
+        '400':
+          description: Invalid JSON, an unparseable identifier, or an empty `links` array
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: Register linkset entries for an identifier (append-only).
+      tags:
+      - admin
+    put:
+      operationId: admin_replace
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`{{"identifier": ..., "links": [entry, ...]}}`; optional `effectiveAt` (RFC 3339, default now)'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: Replaced; the revoked ids, the new entries and the record count are stated
+        '400':
+          description: Invalid JSON, an unparseable identifier, or an empty `links` array
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: |-
+        Replace the effective linkset of an identifier (append-only: the
+        currently effective entries are revoked, the new set appended).
+      tags:
+      - admin
+  /admin/log:
+    get:
+      operationId: admin_log
+      parameters:
+      - description: Records to return (default 100, maximum 10 000)
+        in: query
+        name: limit
+        required: false
+        schema:
+          format: int64
+          minimum: 0
+          type: integer
+      - description: Records to skip (default 0)
+        in: query
+        name: offset
+        required: false
+        schema:
+          format: int64
+          minimum: 0
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The journal window
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: Read the append-only record log.
+      tags:
+      - admin
+  /admin/revocations:
+    post:
+      operationId: admin_revoke
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`{{"identifier": ..., "entryId": <id>}}`; optional `effectiveAt` (RFC 3339, default now) and `reason` (default `revoked`)'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: Revoked as of the effective instant
+        '400':
+          description: An unknown identifier-entry pair or an invalid body
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: Revoke one linkset entry of an identifier.
+      tags:
+      - admin
+  /admin/supersessions:
+    post:
+      operationId: admin_supersede
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: '`{{"identifier": ..., "successor": ...}}`; optional `effectiveAt` (RFC 3339), `authority` and `reason`. The identifier must already be known here, and the successor must not be empty — an unstated successor is a revocation, not a rotation'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: The rotation is recorded; the journal record is stated
+        '400':
+          description: An unknown identifier, an empty successor, or an invalid body
+        '401':
+          description: A bearer token is configured and the request does not carry it
+      summary: |-
+        POST /admin/supersessions — record an identity rotation (TODO.impl
+        224): from `effectiveAt` the identifier's responses state the
+        successor (linkset block + `X-UniDPP-Superseded-By`, and a stated
+        404 once its entries are gone). The identifier must already be
+        known here — a rotation record is a statement *about* registered
+        content, and refusing unknown identifiers keeps typos from
+        manufacturing phantom history.
+        Record an identity rotation: from `effectiveAt`, every non-dark
+        response for the identifier states its successor.
+      tags:
+      - admin
+  /healthz:
+    get:
+      operationId: healthz
+      responses:
+        '200':
+          description: The service is serving
+      summary: Liveness probe.
+      tags:
+      - resolution
+  /normalize:
+    post:
+      operationId: normalize
+      requestBody:
+        content:
+          application/json:
+            schema: {}
+        description: 'The carrier under test: `{"carrier": "..."}`'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: 'The parsed carrier: scheme, identifier components and the canonical form'
+        '400':
+          description: Invalid JSON, a missing `carrier`, an invalid check digit or an unrecognized syntax
+      summary: Translate a carrier value to its canonical identifier.
+      tags:
+      - resolution
+  /resolve:
+    get:
+      operationId: resolve_query
+      parameters:
+      - description: The identifier in any supported syntax (ISO/IEC 15459 URN, GS1 element string or Digital Link, GB/T 33993 path or custom code, legacy EAN-13); mutually exclusive with `carrier`
+        in: query
+        name: identifier
+        required: false
+        schema:
+          type: string
+      - description: A complete carrier value; translated, then resolved — mutually exclusive with `identifier`
+        in: query
+        name: carrier
+        required: false
+        schema:
+          type: string
+      - description: An RFC 3339 instant; the record is resolved as of that instant (I13)
+        in: query
+        name: asof
+        required: false
+        schema:
+          type: string
+      - description: 'Context dimension: profile'
+        in: query
+        name: profile
+        required: false
+        schema:
+          type: string
+      - description: 'Context dimension: verifier role'
+        in: query
+        name: role
+        required: false
+        schema:
+          type: string
+      - description: 'Context dimension: language (BCP 47, exact match then primary-subtag fallback)'
+        in: query
+        name: lang
+        required: false
+        schema:
+          type: string
+      - description: 'Context dimension: region'
+        in: query
+        name: region
+        required: false
+        schema:
+          type: string
+      - description: The link type to resolve (default `dpp`; `all` returns every link)
+        in: query
+        name: linkType
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/linkset+json:
+              schema: {}
+          description: The linkset document (RFC 9264), carrying the rotation and same-subject correlation statements as members and `X-UniDPP-*` headers; the `Link` header names the default link
+        '400':
+          description: Unparseable identifier, invalid carrier check digit, or mutually exclusive parameters
+        '404':
+          description: 'The no-information 404: unknown and dark identifiers answer byte-identically (I12)'
+      summary: Resolve an identifier to its linkset.
+      tags:
+      - resolution
+tags:
+- description: Discovery, resolution and carrier normalization
+  name: resolution
+- description: 'The operator surface: linksets, revocations, dark identities, rotation, correlation, the record log'
+  name: admin
